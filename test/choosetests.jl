@@ -1,11 +1,11 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
-using Random
+using Random, Sockets
 
-const STDLIB_DIR = joinpath(Sys.BINDIR, "..", "share", "julia", "site", "v$(VERSION.major).$(VERSION.minor)")
-const STDLIBS = readdir(STDLIB_DIR)
+const STDLIB_DIR = joinpath(Sys.BINDIR, "..", "share", "julia", "stdlib", "v$(VERSION.major).$(VERSION.minor)")
+const STDLIBS = filter!(x -> isdir(joinpath(STDLIB_DIR, x)), readdir(STDLIB_DIR))
 
-@doc """
+"""
 
 `tests, net_on, exit_on_error, seed = choosetests(choices)` selects a set of tests to be
 run. `choices` should be a vector of test names; if empty or set to
@@ -30,7 +30,7 @@ in the `choices` argument:
    - "--seed=SEED", which sets the value of `seed` to `SEED`
      (parsed as an `UInt128`); `seed` is otherwise initialized randomly.
      This option can be used to reproduce failed tests.
-""" ->
+"""
 function choosetests(choices = [])
     testnames = [
         "subarray", "core", "compiler", "worlds",
@@ -38,28 +38,24 @@ function choosetests(choices = [])
         "char", "strings", "triplequote", "unicode", "intrinsics",
         "dict", "hashing", "iobuffer", "staged", "offsetarray",
         "arrayops", "tuple", "reduce", "reducedim", "abstractarray",
-        "intfuncs", "simdloop", "vecelement",
+        "intfuncs", "simdloop", "vecelement", "rational",
         "bitarray", "copy", "math", "fastmath", "functional", "iterators",
         "operators", "path", "ccall", "parse", "loading", "bigint",
-        "bigfloat", "sorting", "statistics", "spawn", "backtrace",
+        "bigfloat", "sorting", "spawn", "backtrace",
         "file", "read", "version", "namedtuple",
-        "mpfr", "broadcast", "complex", "socket",
+        "mpfr", "broadcast", "complex",
         "floatapprox", "stdlib", "reflection", "regex", "float16",
         "combinatorics", "sysinfo", "env", "rounding", "ranges", "mod2pi",
         "euler", "show",
         "errorshow", "sets", "goto", "llvmcall", "llvmcall2", "grisu",
-        "some", "meta", "stacktraces", "libgit2", "docs",
-        "misc", "threads",
-        "enums", "cmdlineargs", "i18n", "int",
-        "checked", "bitset", "floatfuncs", "compile", "inline",
+        "some", "meta", "stacktraces", "docs",
+        "misc", "threads", "stress",
+        "enums", "cmdlineargs", "int",
+        "checked", "bitset", "floatfuncs", "precompile", "inline",
         "boundscheck", "error", "ambiguous", "cartesian", "osutils",
-        "channels", "iostream", "specificity", "codegen",
+        "channels", "iostream", "secretbuffer", "specificity", "codegen",
         "reinterpretarray", "syntax", "logging", "missing", "asyncmap"
     ]
-
-    if isdir(joinpath(Sys.BINDIR, Base.DOCDIR, "examples"))
-        push!(testnames, "examples")
-    end
 
     tests = []
     skip_tests = []
@@ -128,25 +124,6 @@ function choosetests(choices = [])
         prepend!(tests, STDLIBS)
     end
 
-
-    explicit_pkg =  "Pkg/pkg" in tests
-    new_tests = String[]
-    for test in tests
-        if test in STDLIBS
-            testfile = joinpath(STDLIB_DIR, test, "test", "testgroups")
-            if isfile(testfile)
-                prepend!(new_tests, (test * "/") .* readlines(testfile))
-            else
-                push!(new_tests, test)
-            end
-        end
-    end
-    filter!(x -> (x != "stdlib" && !(x in STDLIBS)) , tests)
-    prepend!(tests, new_tests)
-    if !explicit_pkg
-        filter!(x -> x != "Pkg/pkg", tests)
-    end
-
     # do ambiguous first to avoid failing if ambiguities are introduced by other tests
     if "ambiguous" in skip_tests
         filter!(x -> x != "ambiguous", tests)
@@ -162,7 +139,7 @@ function choosetests(choices = [])
         filter!(x -> (x != "Profile"), tests)
     end
 
-    net_required_for = ["socket", "libgit2"]
+    net_required_for = ["Sockets", "LibGit2"]
     net_on = true
     try
         ipa = getipaddr()
@@ -172,7 +149,7 @@ function choosetests(choices = [])
     end
 
     if !net_on
-        filter!(!occursin(net_required_for), tests)
+        filter!(!in(net_required_for), tests)
     end
 
     if ccall(:jl_running_on_valgrind,Cint,()) != 0 && "rounding" in tests
@@ -180,10 +157,30 @@ function choosetests(choices = [])
         filter!(x -> x != "rounding", tests)
     end
 
-    # The shift and invert solvers need SuiteSparse for sparse input
-    Base.USE_GPL_LIBS || filter!(x->x != "IterativeEigensolvers", STDLIBS)
+    filter!(!in(skip_tests), tests)
 
-    filter!(!occursin(skip_tests), tests)
+    explicit_pkg3    =  "Pkg/pkg"       in tests
+    explicit_libgit2 =  "LibGit2/online" in tests
+    new_tests = String[]
+    for test in tests
+        if test in STDLIBS
+            testfile = joinpath(STDLIB_DIR, test, "test", "testgroups")
+            if isfile(testfile)
+                testgroups = readlines(testfile)
+                length(testgroups) == 0 && error("no testgroups defined for $test")
+                prepend!(new_tests, (test * "/") .* testgroups)
+            else
+                push!(new_tests, test)
+            end
+        end
+    end
+    filter!(x -> (x != "stdlib" && !(x in STDLIBS)) , tests)
+    append!(tests, new_tests)
+    explicit_pkg3    || filter!(x -> x != "Pkg/pkg",       tests)
+    explicit_libgit2 || filter!(x -> x != "LibGit2/online", tests)
+
+    # Filter out tests from the test groups in the stdlibs
+    filter!(!in(skip_tests), tests)
 
     tests, net_on, exit_on_error, seed
 end

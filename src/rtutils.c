@@ -471,14 +471,14 @@ JL_DLLEXPORT void jl_flush_cstdio(void)
 JL_DLLEXPORT jl_value_t *jl_stdout_obj(void)
 {
     if (jl_base_module == NULL) return NULL;
-    jl_value_t *stdout_obj = jl_get_global(jl_base_module, jl_symbol("STDOUT"));
+    jl_value_t *stdout_obj = jl_get_global(jl_base_module, jl_symbol("stdout"));
     return stdout_obj;
 }
 
 JL_DLLEXPORT jl_value_t *jl_stderr_obj(void)
 {
     if (jl_base_module == NULL) return NULL;
-    jl_value_t *stderr_obj = jl_get_global(jl_base_module, jl_symbol("STDERR"));
+    jl_value_t *stderr_obj = jl_get_global(jl_base_module, jl_symbol("stderr"));
     return stderr_obj;
 }
 
@@ -767,9 +767,6 @@ static size_t jl_static_show_x_(JL_STREAM *out, jl_value_t *v, jl_datatype_t *vt
         char *name = jl_symbol_name(jl_globalref_name(v));
         n += jl_printf(out, jl_is_identifier(name) ? ".%s" : ".:(%s)", name);
     }
-    else if (vt == jl_labelnode_type) {
-        n += jl_printf(out, "%" PRIuPTR ":", jl_labelnode_label(v));
-    }
     else if (vt == jl_gotonode_type) {
         n += jl_printf(out, "goto %" PRIuPTR, jl_gotonode_label(v));
     }
@@ -808,21 +805,26 @@ static size_t jl_static_show_x_(JL_STREAM *out, jl_value_t *v, jl_datatype_t *vt
         }
         else {
             char sep = ' ';
-            if (e->head == body_sym)
-                sep = '\n';
             n += jl_printf(out, "Expr(:%s", jl_symbol_name(e->head));
             size_t i, len = jl_array_len(e->args);
             for (i = 0; i < len; i++) {
                 n += jl_printf(out, ",%c", sep);
                 n += jl_static_show_x(out, jl_exprarg(e,i), depth);
             }
-            n += jl_printf(out, ")::");
-            n += jl_static_show_x(out, e->etype, depth);
+            n += jl_printf(out, ")");
         }
     }
     else if (jl_is_array_type(vt)) {
-        n += jl_static_show_x(out, (jl_value_t*)vt, depth);
-        n += jl_printf(out, "[");
+        n += jl_printf(out, "Array{");
+        n += jl_static_show_x(out, (jl_value_t*)jl_tparam0(vt), depth);
+        n += jl_printf(out, ", (");
+        size_t i, ndims = jl_array_ndims(v);
+        if (ndims == 1)
+            n += jl_printf(out, "%" PRIdPTR ",", jl_array_dim0(v));
+        else
+            for (i = 0; i < ndims; i++)
+                n += jl_printf(out, (i > 0 ? ", %" PRIdPTR : "%" PRIdPTR), jl_array_dim(v, i));
+        n += jl_printf(out, ")}[");
         size_t j, tlen = jl_array_len(v);
         jl_array_t *av = (jl_array_t*)v;
         jl_datatype_t *el_type = (jl_datatype_t*)jl_tparam0(vt);
@@ -873,11 +875,16 @@ static size_t jl_static_show_x_(JL_STREAM *out, jl_value_t *v, jl_datatype_t *vt
     }
     else if (jl_is_datatype(vt)) {
         int istuple = jl_is_tuple_type(vt), isnamedtuple = jl_is_namedtuple_type(vt);
-        if (!istuple && !isnamedtuple)
+        size_t tlen = jl_datatype_nfields(vt);
+        if (isnamedtuple) {
+            if (tlen == 0)
+                n += jl_printf(out, "NamedTuple");
+        }
+        else if (!istuple) {
             n += jl_static_show_x(out, (jl_value_t*)vt, depth);
+        }
         n += jl_printf(out, "(");
         size_t nb = jl_datatype_size(vt);
-        size_t tlen = jl_datatype_nfields(vt);
         if (nb > 0 && tlen == 0) {
             uint8_t *data = (uint8_t*)v;
             n += jl_printf(out, "0x");
@@ -1102,26 +1109,6 @@ void jl_depwarn(const char *msg, jl_value_t *sym)
     depwarn_args[1] = jl_cstr_to_string(msg);
     depwarn_args[2] = sym;
     jl_apply(depwarn_args, 3);
-    JL_GC_POP();
-}
-
-JL_DLLEXPORT void jl_depwarn_partial_indexing(size_t n)
-{
-    static jl_value_t *depwarn_func = NULL;
-    if (!depwarn_func && jl_base_module) {
-        depwarn_func = jl_get_global(jl_base_module, jl_symbol("_depwarn_for_trailing_indices"));
-    }
-    if (!depwarn_func) {
-        jl_safe_printf("WARNING: omitting indices for non-singleton trailing dimensions is deprecated. Use "
-            "`reshape(A, Val(%zd))` or add trailing `1` indices to make the dimensionality of the array match "
-            "the number of indices\n", n);
-        return;
-    }
-    jl_value_t **depwarn_args;
-    JL_GC_PUSHARGS(depwarn_args, 2);
-    depwarn_args[0] = depwarn_func;
-    depwarn_args[1] = jl_box_long(n);
-    jl_apply(depwarn_args, 2);
     JL_GC_POP();
 }
 

@@ -5,23 +5,18 @@ include("testenv.jl")
 
 using Test, Serialization
 
+isdefined(Main, :MacroCalls) || @eval Main include("testhelpers/MacroCalls.jl")
+using Main.MacroCalls
+
 @test_throws MethodError convert(Enum, 1.0)
 
-macro macrocall(ex)
-    @assert Meta.isexpr(ex, :macrocall)
-    ex.head = :call
-    for i in 2:length(ex.args)
-        ex.args[i] = QuoteNode(ex.args[i])
-    end
-    insert!(ex.args, 3, __module__)
-    return esc(ex)
-end
-
 @test_throws ArgumentError("no arguments given for Enum Foo") @macrocall(@enum Foo)
+@test_throws ArgumentError("invalid base type for Enum Foo2, Foo2::Float64=::Float64; base type must be an integer primitive type") @macrocall(@enum Foo2::Float64 apple=1.)
 
 @enum Fruit apple orange kiwi
 @test typeof(Fruit) == DataType
-@test isbits(Fruit)
+@test isbitstype(Fruit)
+@test isbits(apple)
 @test typeof(apple) <: Fruit <: Enum
 @test Int(apple) == 0
 @test Int(orange) == 1
@@ -133,11 +128,16 @@ end
 # test for unique Enum values
 @test_throws ArgumentError("values for Enum Test14 are not unique") @macrocall(@enum(Test14, _zero_Test14, _one_Test14, _two_Test14=0))
 
-@test repr(apple) == "apple::$(string(Fruit)) = 0"
+@test repr(apple) == "apple::Fruit = 0"
 @test string(apple) == "apple"
 
-@test reprmime("text/plain", Fruit) == "Enum $(string(Fruit)):\napple = 0\norange = 1\nkiwi = 2"
-@test reprmime("text/plain", orange) == "orange::$(curmod_prefix)Fruit = 1"
+@test repr("text/plain", Fruit) == "Enum $(string(Fruit)):\napple = 0\norange = 1\nkiwi = 2"
+@test repr("text/plain", orange) == "orange::Fruit = 1"
+let io = IOBuffer()
+    ioc = IOContext(io, :compact=>false)
+    show(io, Fruit)
+    @test String(take!(io)) == sprint(print, Fruit)
+end
 
 @enum LogLevel DEBUG INFO WARN ERROR CRITICAL
 @test DEBUG < CRITICAL
@@ -148,6 +148,9 @@ let b = IOBuffer()
     seekstart(b)
     @test deserialize(b) === apple
 end
+
+@enum UI8::UInt8 ten=0x0A thr=0x03 sevn=0x07
+@test repr("text/plain", UI8) == "Enum $(string(UI8)):\nten = 0x0a\nthr = 0x03\nsevn = 0x07"
 
 # test block form
 @enum BritishFood begin

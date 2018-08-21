@@ -23,8 +23,12 @@
 @test parse(Int,"-10") == -10
 @test parse(Int64,"3830974272") == 3830974272
 @test parse(Int64,"-3830974272") == -3830974272
+
 @test parse(Int,'3') == 3
 @test parse(Int,'3', base = 8) == 3
+@test parse(Int, 'a', base=16) == 10
+@test_throws ArgumentError parse(Int, 'a')
+@test_throws ArgumentError parse(Int,typemax(Char))
 
 # Issue 20587
 for T in Any[BigInt, Int128, Int16, Int32, Int64, Int8, UInt128, UInt16, UInt32, UInt64, UInt8]
@@ -173,9 +177,6 @@ parsehex(s) = parse(Int,s, base = 16)
 @test parse(Int, "3\u2003\u202F") == 3
 @test_throws ArgumentError parse(Int, "3\u2003\u202F,")
 
-@test parse(Int,'a') == 10
-@test_throws ArgumentError parse(Int,typemax(Char))
-
 @test parse(Int,"1234") == 1234
 @test parse(Int,"0x1234") == 0x1234
 @test parse(Int,"0o1234") == 0o1234
@@ -225,6 +226,32 @@ end
 # error throwing branch from #10560
 @test_throws ArgumentError Base.tryparse_internal(Bool, "foo", 1, 2, 10, true)
 
+# issue #16594
+@test Meta.parse("@x a + \nb") == Meta.parse("@x a +\nb")
+@test [1 +
+       1] == [2]
+@test [1 +1] == [1 1]
+
+# issue #16594, note for the macro tests, order is important
+# because the line number is included as part of the expression
+# (i.e. both macros must start on the same line)
+@test :(@test((1+1) == 2)) == :(@test 1 +
+                                      1 == 2)
+@test :(@x 1 +1 -1) == :(@x(1, +1, -1))
+@test :(@x 1 + 1 -1) == :(@x(1+1, -1))
+@test :(@x 1 + 1 - 1) == :(@x(1 + 1 - 1))
+@test :(@x(1 + 1 - 1)) == :(@x 1 +
+                               1 -
+                               1)
+@test :(@x(1 + 1 + 1)) == :(@x 1 +
+                               1 +
+                               1)
+@test :([x .+
+          y]) == :([x .+ y])
+
+# line break in : expression disallowed
+@test_throws Meta.ParseError Meta.parse("[1 :\n2] == [1:2]")
+
 @test tryparse(Float64, "1.23") === 1.23
 @test tryparse(Float32, "1.23") === 1.23f0
 @test tryparse(Float16, "1.23") === Float16(1.23)
@@ -262,3 +289,15 @@ end
 # only allow certain characters after interpolated vars (#25231)
 @test Meta.parse("\"\$x෴  \"",raise=false) == Expr(:error, "interpolated variable \$x ends with invalid character \"෴\"; use \"\$(x)\" instead.")
 @test Base.incomplete_tag(Meta.parse("\"\$foo", raise=false)) == :string
+
+@testset "parse and tryparse type inference" begin
+    @inferred parse(Int, "12")
+    @inferred parse(Float64, "12")
+    @inferred parse(Complex{Int}, "12")
+    @test eltype([parse(Int, s, base=16) for s in String[]]) == Int
+    @test eltype([parse(Float64, s) for s in String[]]) == Float64
+    @test eltype([parse(Complex{Int}, s) for s in String[]]) == Complex{Int}
+    @test eltype([tryparse(Int, s, base=16) for s in String[]]) == Union{Nothing, Int}
+    @test eltype([tryparse(Float64, s) for s in String[]]) == Union{Nothing, Float64}
+    @test eltype([tryparse(Complex{Int}, s) for s in String[]]) == Union{Nothing, Complex{Int}}
+end

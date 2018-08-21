@@ -16,6 +16,7 @@ mutable struct GenericIOBuffer{T<:AbstractVector{UInt8}} <: IO
 
     function GenericIOBuffer{T}(data::T, readable::Bool, writable::Bool, seekable::Bool, append::Bool,
                                 maxsize::Integer) where T<:AbstractVector{UInt8}
+        @assert !has_offset_axes(data)
         new(data,readable,writable,seekable,append,length(data),maxsize,1,-1)
     end
 end
@@ -32,47 +33,17 @@ StringVector(n::Integer) = unsafe_wrap(Vector{UInt8}, _string_n(n))
 # IOBuffers behave like Files. They are typically readable and writable. They are seekable. (They can be appendable).
 
 """
-    IOBuffer([data, ][readable::Bool=true, writable::Bool=false[, maxsize::Int=typemax(Int)]])
+    IOBuffer([data::AbstractVector{UInt8}]; keywords...) -> IOBuffer
 
-Create an `IOBuffer`, which may optionally operate on a pre-existing array. If the
-readable/writable arguments are given, they restrict whether or not the buffer may be read
-from or written to respectively. The last argument optionally specifies a size beyond which
-the buffer may not be grown.
+Create an in-memory I/O stream, which may optionally operate on a pre-existing array.
 
-# Examples
-```jldoctest
-julia> io = IOBuffer("JuliaLang is a GitHub organization.")
-IOBuffer(data=UInt8[...], readable=true, writable=false, seekable=true, append=false, size=35, maxsize=Inf, ptr=1, mark=-1)
+It may take optional keyword arguments:
+- `read`, `write`, `append`: restricts operations to the buffer; see `open` for details.
+- `truncate`: truncates the buffer size to zero length.
+- `maxsize`: specifies a size beyond which the buffer may not be grown.
+- `sizehint`: suggests a capacity of the buffer (`data` must implement `sizehint!(data, size)`).
 
-julia> read(io, String)
-"JuliaLang is a GitHub organization."
-
-julia> write(io, "This isn't writable.")
-ERROR: ArgumentError: ensureroom failed, IOBuffer is not writeable
-
-julia> io = IOBuffer(UInt8[], true, true, 34)
-IOBuffer(data=UInt8[...], readable=true, writable=true, seekable=true, append=false, size=0, maxsize=34, ptr=1, mark=-1)
-
-julia> write(io, "JuliaLang is a GitHub organization.")
-34
-
-julia> String(take!(io))
-"JuliaLang is a GitHub organization"
-```
-"""
-IOBuffer(data::AbstractVector{UInt8}, readable::Bool=true, writable::Bool=false, maxsize::Integer=typemax(Int)) =
-    GenericIOBuffer(data, readable, writable, true, false, maxsize)
-function IOBuffer(readable::Bool, writable::Bool)
-    b = IOBuffer(StringVector(32), readable, writable)
-    b.data[:] = 0
-    b.size = 0
-    return b
-end
-
-"""
-    IOBuffer() -> IOBuffer
-
-Create an in-memory I/O stream, which is both readable and writable.
+When `data` is not given, the buffer will be both readable and writable by default.
 
 # Examples
 ```jldoctest
@@ -83,34 +54,73 @@ julia> write(io, "JuliaLang is a GitHub organization.", " It has many members.")
 
 julia> String(take!(io))
 "JuliaLang is a GitHub organization. It has many members."
-```
-"""
-IOBuffer() = IOBuffer(true, true)
 
-"""
-    IOBuffer(size::Integer)
+julia> io = IOBuffer(b"JuliaLang is a GitHub organization.")
+IOBuffer(data=UInt8[...], readable=true, writable=false, seekable=true, append=false, size=35, maxsize=Inf, ptr=1, mark=-1)
 
-Create a fixed size IOBuffer. The buffer will not grow dynamically.
+julia> read(io, String)
+"JuliaLang is a GitHub organization."
 
-# Examples
-```jldoctest
-julia> io = IOBuffer(12)
-IOBuffer(data=UInt8[...], readable=true, writable=true, seekable=true, append=false, size=0, maxsize=12, ptr=1, mark=-1)
+julia> write(io, "This isn't writable.")
+ERROR: ArgumentError: ensureroom failed, IOBuffer is not writeable
 
-julia> write(io, "Hello world.")
-12
+julia> io = IOBuffer(UInt8[], read=true, write=true, maxsize=34)
+IOBuffer(data=UInt8[...], readable=true, writable=true, seekable=true, append=false, size=0, maxsize=34, ptr=1, mark=-1)
 
-julia> String(take!(io))
-"Hello world."
-
-julia> write(io, "Hello world again.")
-12
+julia> write(io, "JuliaLang is a GitHub organization.")
+34
 
 julia> String(take!(io))
-"Hello world "
+"JuliaLang is a GitHub organization"
+
+julia> length(read(IOBuffer(b"data", read=true, truncate=false)))
+4
+
+julia> length(read(IOBuffer(b"data", read=true, truncate=true)))
+0
 ```
 """
-IOBuffer(maxsize::Integer) = (x=IOBuffer(StringVector(maxsize), true, true, maxsize); x.size=0; x)
+function IOBuffer(
+        data::AbstractVector{UInt8};
+        read::Union{Bool,Nothing}=nothing,
+        write::Union{Bool,Nothing}=nothing,
+        append::Union{Bool,Nothing}=nothing,
+        truncate::Union{Bool,Nothing}=nothing,
+        maxsize::Integer=typemax(Int),
+        sizehint::Union{Integer,Nothing}=nothing)
+    if maxsize < 0
+        throw(ArgumentError("negative maxsize: $(maxsize)"))
+    end
+    if sizehint !== nothing
+        sizehint!(data, sizehint)
+    end
+    flags = open_flags(read=read, write=write, append=append, truncate=truncate)
+    buf = GenericIOBuffer(data, flags.read, flags.write, true, flags.append, Int(maxsize))
+    if flags.truncate
+        buf.size = 0
+    end
+    return buf
+end
+
+function IOBuffer(;
+        read::Union{Bool,Nothing}=true,
+        write::Union{Bool,Nothing}=true,
+        append::Union{Bool,Nothing}=nothing,
+        truncate::Union{Bool,Nothing}=true,
+        maxsize::Integer=typemax(Int),
+        sizehint::Union{Integer,Nothing}=nothing)
+    size = sizehint !== nothing ? Int(sizehint) : maxsize != typemax(Int) ? Int(maxsize) : 32
+    flags = open_flags(read=read, write=write, append=append, truncate=truncate)
+    buf = IOBuffer(
+        StringVector(size),
+        read=flags.read,
+        write=flags.write,
+        append=flags.append,
+        truncate=flags.truncate,
+        maxsize=maxsize)
+    fill!(buf.data, 0)
+    return buf
+end
 
 # PipeBuffers behave like Unix Pipes. They are typically readable and writable, they act appendable, and are not seekable.
 
@@ -158,11 +168,12 @@ function unsafe_read(from::GenericIOBuffer, p::Ptr{UInt8}, nb::UInt)
 end
 
 function read_sub(from::GenericIOBuffer, a::AbstractArray{T}, offs, nel) where T
+    @assert !has_offset_axes(a)
     from.readable || throw(ArgumentError("read failed, IOBuffer is not readable"))
     if offs+nel-1 > length(a) || offs < 1 || nel < 0
         throw(BoundsError())
     end
-    if isbits(T) && isa(a,Array)
+    if isbitstype(T) && isa(a,Array)
         nb = UInt(nel * sizeof(T))
         GC.@preserve a unsafe_read(from, pointer(a, offs), nb)
     else
@@ -237,7 +248,7 @@ function truncate(io::GenericIOBuffer, n::Integer)
     if n > length(io.data)
         resize!(io.data, n)
     end
-    io.data[io.size+1:n] = 0
+    io.data[io.size+1:n] .= 0
     io.size = n
     io.ptr = min(io.ptr, n+1)
     ismarked(io) && io.mark > n && unmark(io)
@@ -317,11 +328,11 @@ Obtain the contents of an `IOBuffer` as an array, without copying. Afterwards, t
 ```jldoctest
 julia> io = IOBuffer();
 
-julia> write(io, "JuliaLang is a GitHub organization.", "It has many members.")
-55
+julia> write(io, "JuliaLang is a GitHub organization.", " It has many members.")
+56
 
 julia> String(take!(io))
-"JuliaLang is a GitHub organization.It has many members."
+"JuliaLang is a GitHub organization. It has many members."
 ```
 """
 function take!(io::GenericIOBuffer)
@@ -392,6 +403,7 @@ function unsafe_write(to::GenericIOBuffer, p::Ptr{UInt8}, nb::UInt)
 end
 
 function write_sub(to::GenericIOBuffer, a::AbstractArray{UInt8}, offs, nel)
+    @assert !has_offset_axes(a)
     if offs+nel-1 > length(a) || offs < 1 || nel < 0
         throw(BoundsError())
     end
@@ -426,22 +438,19 @@ read(io::GenericIOBuffer) = read!(io,StringVector(bytesavailable(io)))
 readavailable(io::GenericIOBuffer) = read(io)
 read(io::GenericIOBuffer, nb::Integer) = read!(io,StringVector(min(nb, bytesavailable(io))))
 
-function findfirst(delim::EqualTo{UInt8}, buf::IOBuffer)
+function occursin(delim::UInt8, buf::IOBuffer)
     p = pointer(buf.data, buf.ptr)
-    q = GC.@preserve buf ccall(:memchr,Ptr{UInt8},(Ptr{UInt8},Int32,Csize_t),p,delim.x,bytesavailable(buf))
-    q == C_NULL && return nothing
-    return Int(q-p+1)
+    q = GC.@preserve buf ccall(:memchr,Ptr{UInt8},(Ptr{UInt8},Int32,Csize_t),p,delim,bytesavailable(buf))
+    return q != C_NULL
 end
 
-function findfirst(delim::EqualTo{UInt8}, buf::GenericIOBuffer)
+function occursin(delim::UInt8, buf::GenericIOBuffer)
     data = buf.data
-    for i = buf.ptr : buf.size
+    for i = buf.ptr:buf.size
         @inbounds b = data[i]
-        if b == delim.x
-            return i - buf.ptr + 1
-        end
+        b == delim && return true
     end
-    return nothing
+    return false
 end
 
 function readuntil(io::GenericIOBuffer, delim::UInt8; keep::Bool=false)

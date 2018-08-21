@@ -1,14 +1,12 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
 struct SummarySize
-    seen::IdDict
+    seen::IdDict{Any,Any}
     frontier_x::Vector{Any}
     frontier_i::Vector{Int}
     exclude::Any
     chargeall::Any
 end
-
-_nfields(@nospecialize x) = length(typeof(x).types)
 
 """
     Base.summarysize(obj; exclude=Union{...}, chargeall=Union{...}) -> Int
@@ -21,8 +19,8 @@ Compute the amount of memory used by all unique objects reachable from the argum
   fields, even if those fields would normally be excluded.
 """
 function summarysize(obj;
-                     exclude = Union{DataType, TypeName, Core.MethodInstance},
-                     chargeall = Union{TypeMapEntry, Method})
+                     exclude = Union{DataType, Core.TypeName, Core.MethodInstance},
+                     chargeall = Union{Core.TypeMapEntry, Method})
     @nospecialize obj exclude chargeall
     ss = SummarySize(IdDict(), Any[], Int[], exclude, chargeall)
     size::Int = ss(obj)
@@ -43,9 +41,9 @@ function summarysize(obj;
                 val = x[i]
             end
         else
-            nf = _nfields(x)
+            nf = nfields(x)
             ft = typeof(x).types
-            if !isbits(ft[i]) && isdefined(x, i)
+            if !isbitstype(ft[i]) && isdefined(x, i)
                 val = getfield(x, i)
             end
         end
@@ -65,11 +63,12 @@ end
 (ss::SummarySize)(@nospecialize obj) = _summarysize(ss, obj)
 # define the general case separately to make sure it is not specialized for every type
 @noinline function _summarysize(ss::SummarySize, @nospecialize obj)
+    isdefined(typeof(obj), :instance) && return 0
     # NOTE: this attempts to discover multiple copies of the same immutable value,
     # and so is somewhat approximate.
     key = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
     haskey(ss.seen, key) ? (return 0) : (ss.seen[key] = true)
-    if _nfields(obj) > 0
+    if nfields(obj) > 0
         push!(ss.frontier_x, obj)
         push!(ss.frontier_i, 1)
     end
@@ -88,13 +87,13 @@ function (ss::SummarySize)(obj::DataType)
     key = pointer_from_objref(obj)
     haskey(ss.seen, key) ? (return 0) : (ss.seen[key] = true)
     size::Int = 7 * Core.sizeof(Int) + 6 * Core.sizeof(Int32)
-    size += 4 * _nfields(obj) + ifelse(Sys.WORD_SIZE == 64, 4, 0)
+    size += 4 * nfields(obj) + ifelse(Sys.WORD_SIZE == 64, 4, 0)
     size += ss(obj.parameters)::Int
     size += ss(obj.types)::Int
     return size
 end
 
-function (ss::SummarySize)(obj::TypeName)
+function (ss::SummarySize)(obj::Core.TypeName)
     key = pointer_from_objref(obj)
     haskey(ss.seen, key) ? (return 0) : (ss.seen[key] = true)
     return Core.sizeof(obj) + (isdefined(obj, :mt) ? ss(obj.mt) : 0)
@@ -108,7 +107,7 @@ function (ss::SummarySize)(obj::Array)
     if !haskey(ss.seen, datakey)
         ss.seen[datakey] = true
         size += Core.sizeof(obj)
-        if !isbits(eltype(obj)) && !isempty(obj)
+        if !isbitstype(eltype(obj)) && !isempty(obj)
             push!(ss.frontier_x, obj)
             push!(ss.frontier_i, 1)
         end

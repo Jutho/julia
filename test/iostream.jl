@@ -33,7 +33,7 @@
         for (byte,char) in zip(1:4, ('@','߷','࿊','𐋺'))
             append_to_file("abcdef$char")
             @test Base.codelen(char) == byte
-            @test !eof(skipchars(isalpha, file))
+            @test !eof(skipchars(isletter, file))
             @test read(file, Char) == char
         end
     end
@@ -51,6 +51,14 @@ end
         b = UInt8[0]
         readbytes!(file, b, all=false)
         @test String(b) == "a"
+        # with resizing of b
+        b = UInt8[]
+        readbytes!(file, b, 2, all=false)
+        @test String(b) == "aa"
+        # readbytes_all with resizing
+        b = UInt8[]
+        readbytes!(file, b, 15)
+        @test String(b) == "aaaaaaaaaaaaaa"
     end
 end
 @testset "issue #18755" begin
@@ -59,6 +67,18 @@ end
         @test position(io) == 131073
         write(io, zeros(UInt8, 131073))
         @test position(io) == 262146
+    end
+end
+
+@testset "issue #27951" begin
+    a = UInt8[1 3; 2 4]
+    s = view(a, [1,2], :)
+    mktemp() do path, io
+        write(io, s)
+        seek(io, 0)
+        b = Vector{UInt8}(undef, 4)
+        @test readbytes!(io, b) == 4
+        @test b == 0x01:0x04
     end
 end
 

@@ -159,25 +159,25 @@ end
 @test _nospec_with_default(10) == 20
 
 
-let oldout = STDOUT
+let oldout = stdout
+    ex = Meta.@lower @dump x + y
     local rdout, wrout, out
     try
         rdout, wrout = redirect_stdout()
         out = @async read(rdout, String)
 
-        @test eval(:(@dump x + y)) === nothing
+        @test eval(ex) === nothing
 
         redirect_stdout(oldout)
         close(wrout)
 
-        @test wait(out) == """
+        @test fetch(out) == """
             Expr
               head: Symbol call
               args: Array{Any}((3,))
                 1: Symbol +
                 2: Symbol x
                 3: Symbol y
-              typ: Any
             """
     finally
         redirect_stdout(oldout)

@@ -11,7 +11,7 @@ n = 10
 n1 = div(n, 2)
 n2 = 2*n1
 
-srand(1234321)
+Random.seed!(1234321)
 
 areal = randn(n,n)/2
 aimg  = randn(n,n)/2
@@ -26,8 +26,8 @@ aimg  = randn(n,n)/2
                             view(apd, 1:n, 1:n)))
         ε = εa = eps(abs(float(one(eltya))))
 
-        d,v = eig(a)
-        f   = schurfact(a)
+        d,v = eigen(a)
+        f   = schur(a)
         @test f.vectors*f.Schur*f.vectors' ≈ a
         @test sort(real(f.values)) ≈ sort(real(d))
         @test sort(imag(f.values)) ≈ sort(imag(d))
@@ -46,15 +46,16 @@ aimg  = randn(n,n)/2
         sch, vecs, vals = schur(Tridiagonal(a + transpose(a)))
         @test vecs*sch*vecs' ≈ Tridiagonal(a + transpose(a))
 
-        tstring = sprint(show,f.T)
-        zstring = sprint(show,f.Z)
-        vstring = sprint(show,f.values)
-        @test sprint(show,f) == "$(typeof(f)) with factors T and Z:\n$tstring\n$(zstring)\nand values:\n$vstring"
+        tstring = sprint((t, s) -> show(t, "text/plain", s), f.T)
+        zstring = sprint((t, s) -> show(t, "text/plain", s), f.Z)
+        vstring = sprint((t, s) -> show(t, "text/plain", s), f.values)
+        fstring = sprint((t, s) -> show(t, "text/plain", s), f)
+        @test fstring == "$(summary(f))\nT factor:\n$tstring\nZ factor:\n$(zstring)\neigenvalues:\n$vstring"
         @testset "Reorder Schur" begin
             # use asym for real schur to enforce tridiag structure
             # avoiding partly selection of conj. eigenvalues
             ordschura = eltya <: Complex ? a : asym
-            S = schurfact(ordschura)
+            S = schur(ordschura)
             select = bitrand(n)
             O = ordschur(S, select)
             sum(select) != 0 && @test S.values[findall(select)] ≈ O.values[1:sum(select)]
@@ -74,20 +75,29 @@ aimg  = randn(n,n)/2
             a2_sf = view(a, n1+1:n2, n1+1:n2)
         end
         @testset "Generalized Schur" begin
-            f = schurfact(a1_sf, a2_sf)
+            f = schur(a1_sf, a2_sf)
             @test f.Q*f.S*f.Z' ≈ a1_sf
             @test f.Q*f.T*f.Z' ≈ a2_sf
             @test istriu(f.S) || eltype(a)<:Real
             @test istriu(f.T) || eltype(a)<:Real
             @test_throws ErrorException f.A
+
+            sstring = sprint((t, s) -> show(t, "text/plain", s), f.S)
+            tstring = sprint((t, s) -> show(t, "text/plain", s), f.T)
+            qstring = sprint((t, s) -> show(t, "text/plain", s), f.Q)
+            zstring = sprint((t, s) -> show(t, "text/plain", s), f.Z)
+            αstring = sprint((t, s) -> show(t, "text/plain", s), f.α)
+            βstring = sprint((t, s) -> show(t, "text/plain", s), f.β)
+            fstring = sprint((t, s) -> show(t, "text/plain", s), f)
+            @test fstring == "$(summary(f))\nS factor:\n$sstring\nT factor:\n$(tstring)\nQ factor:\n$(qstring)\nZ factor:\n$(zstring)\nα:\n$αstring\nβ:\n$βstring"
         end
         @testset "Reorder Generalized Schur" begin
-            NS = schurfact(a1_sf, a2_sf)
+            NS = schur(a1_sf, a2_sf)
             # Currently just testing with selecting gen eig values < 1
             select = abs2.(NS.values) .< 1
             m = sum(select)
             S = ordschur(NS, select)
-            # Make sure that the new factorization stil factors matrix
+            # Make sure that the new factorization still factors matrix
             @test S.Q*S.S*S.Z' ≈ a1_sf
             @test S.Q*S.T*S.Z' ≈ a2_sf
             # Make sure that we have sorted it correctly

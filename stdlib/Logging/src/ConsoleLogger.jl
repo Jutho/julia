@@ -1,7 +1,7 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
 """
-    ConsoleLogger(stream=STDERR, min_level=Info; meta_formatter=default_metafmt,
+    ConsoleLogger(stream=stderr, min_level=Info; meta_formatter=default_metafmt,
                   show_limited=true, right_justify=0)
 
 Logger with formatting optimized for readability in a text console, for example
@@ -30,7 +30,7 @@ struct ConsoleLogger <: AbstractLogger
     right_justify::Int
     message_limits::Dict{Any,Int}
 end
-function ConsoleLogger(stream::IO=STDERR, min_level=Info;
+function ConsoleLogger(stream::IO=stderr, min_level=Info;
                        meta_formatter=default_metafmt, show_limited=true,
                        right_justify=0)
     ConsoleLogger(stream, min_level, meta_formatter,
@@ -60,8 +60,18 @@ end
 function default_metafmt(level, _module, group, id, file, line)
     color = default_logcolor(level)
     prefix = (level == Warn ? "Warning" : string(level))*':'
-    suffix = (Info <= level < Warn) ? "" : "@ $_module $(basename(file)):$line"
-    color,prefix,suffix
+    suffix = ""
+    Info <= level < Warn && return color, prefix, suffix
+    _module !== nothing && (suffix *= "$(_module)")
+    if file !== nothing
+        _module !== nothing && (suffix *= " ")
+        suffix *= Base.contractuser(file)
+        if line !== nothing
+            suffix *= ":$(isa(line, UnitRange) ? "$(first(line))-$(last(line))" : line)"
+        end
+    end
+    !isempty(suffix) && (suffix = "@ " * suffix)
+    return color, prefix, suffix
 end
 
 # Length of a string as it will appear in the terminal (after ANSI color codes
@@ -101,10 +111,8 @@ function handle_message(logger::ConsoleLogger, level, message, _module, group, i
         valbuf = IOBuffer()
         rows_per_value = max(1, dsize[1]÷(length(kwargs)+1))
         valio = IOContext(IOContext(valbuf, logger.stream),
-                          :displaysize=>(rows_per_value,dsize[2]-5))
-        if logger.show_limited
-            valio = IOContext(valio, :limit=>true)
-        end
+                          :displaysize => (rows_per_value,dsize[2]-5),
+                          :limit => logger.show_limited)
         for (key,val) in pairs(kwargs)
             showvalue(valio, val)
             vallines = split(String(take!(valbuf)), '\n')

@@ -5,11 +5,13 @@
 """
     print([io::IO], xs...)
 
-Write to `io` (or to the default output stream [`STDOUT`](@ref)
+Write to `io` (or to the default output stream [`stdout`](@ref)
 if `io` is not given) a canonical (un-decorated) text representation
 of values `xs` if there is one, otherwise call [`show`](@ref).
 The representation used by `print` includes minimal formatting and tries to
 avoid Julia-specific details.
+
+Printing `nothing` is not allowed and throws an error.
 
 # Examples
 ```jldoctest
@@ -49,7 +51,7 @@ end
     println([io::IO], xs...)
 
 Print (using [`print`](@ref)) `xs` followed by a newline.
-If `io` is not supplied, prints to [`STDOUT`](@ref).
+If `io` is not supplied, prints to [`stdout`](@ref).
 
 # Examples
 ```jldoctest
@@ -69,22 +71,30 @@ println(io::IO, xs...) = print(io, xs..., '\n')
 ## conversion of general objects to strings ##
 
 """
-    sprint(f::Function, args...)
+    sprint(f::Function, args...; context=nothing, sizehint=0)
 
 Call the given function with an I/O stream and the supplied extra arguments.
 Everything written to this I/O stream is returned as a string.
+`context` can be either an [`IOContext`](@ref) whose properties will be used,
+or a `Pair` specifying a property and its value. `sizehint` suggests the capacity
+of the buffer (in bytes).
+
+The optional keyword argument `context` can be set to `:key=>value` pair
+or an `IO` or [`IOContext`](@ref) object whose attributes are used for the I/O
+stream passed to `f`.  The optional `sizehint` is a suggested size (in bytes)
+to allocate for the buffer used to write the string.
 
 # Examples
 ```jldoctest
-julia> sprint(showcompact, 66.66666)
+julia> sprint(show, 66.66666; context=:compact => true)
 "66.6667"
+
+julia> sprint(showerror, BoundsError([1], 100))
+"BoundsError: attempt to access 1-element Array{Int64,1} at index [100]"
 ```
 """
 function sprint(f::Function, args...; context=nothing, sizehint::Integer=0)
-    s = IOBuffer(StringVector(sizehint), true, true)
-    # specialized version of truncate(s,0)
-    s.size = 0
-    s.ptr = 1
+    s = IOBuffer(sizehint=sizehint)
     if context !== nothing
         f(IOContext(s, context), args...)
     else
@@ -99,11 +109,11 @@ tostr_sizehint(x::Float64) = 20
 tostr_sizehint(x::Float32) = 12
 
 function print_to_string(xs...; env=nothing)
+    if isempty(xs)
+        return ""
+    end
     # specialized for performance reasons
-    s = IOBuffer(StringVector(tostr_sizehint(xs[1])), true, true)
-    # specialized version of truncate(s,0)
-    s.size = 0
-    s.ptr = 1
+    s = IOBuffer(sizehint=tostr_sizehint(xs[1]))
     if env !== nothing
         env_io = IOContext(s, env)
         for x in xs
@@ -122,7 +132,7 @@ string_with_env(env, xs...) = print_to_string(xs...; env=env)
 """
     string(xs...)
 
-Create a string from any values using the [`print`](@ref) function.
+Create a string from any values, except `nothing`, using the [`print`](@ref) function.
 
 # Examples
 ```jldoctest
@@ -132,12 +142,16 @@ julia> string("a", 1, true)
 """
 string(xs...) = print_to_string(xs...)
 
-print(io::IO, s::AbstractString) = (write(io, s); nothing)
+# note: print uses an encoding determined by `io` (defaults to UTF-8), whereas
+#       write uses an encoding determined by `s` (UTF-8 for `String`)
+print(io::IO, s::AbstractString) = for c in s; print(io, c); end
 write(io::IO, s::AbstractString) = (len = 0; for c in s; len += write(io, c); end; len)
 show(io::IO, s::AbstractString) = print_quoted(io, s)
 
-write(to::GenericIOBuffer, s::SubString{String}) =
-    s.ncodeunits ≤ 0 ? 0 : unsafe_write(to, pointer(s.string, s.offset+1), UInt(s.ncodeunits))
+# optimized methods to avoid iterating over chars
+write(io::IO, s::Union{String,SubString{String}}) =
+    GC.@preserve s unsafe_write(io, pointer(s), reinterpret(UInt, sizeof(s)))
+print(io::IO, s::Union{String,SubString{String}}) = (write(io, s); nothing)
 
 ## printing literal quoted string data ##
 
@@ -150,12 +164,17 @@ function print_quoted_literal(io, s::AbstractString)
 end
 
 """
-    repr(x)
-    repr(x, context::Pair{Symbol,<:Any}...)
+    repr(x; context=nothing)
 
 Create a string from any value using the [`show`](@ref) function.
-If context pairs are given, the IO buffer used to capture `show` output
-is wrapped in an `IOContext` object with those context pairs.
+
+The optional keyword argument `context` can be set to an `IO` or [`IOContext`](@ref)
+object whose attributes are used for the I/O stream passed to `show`.
+
+Note that `repr(x)` is usually similar to how the value of `x` would
+be entered in Julia.  See also [`repr(MIME("text/plain"), x)`](@ref) to instead
+return a "pretty-printed" version of `x` designed more for human consumption,
+equivalent to the REPL display of `x`.
 
 # Examples
 ```jldoctest
@@ -165,19 +184,15 @@ julia> repr(1)
 julia> repr(zeros(3))
 "[0.0, 0.0, 0.0]"
 
+julia> repr(big(1/3))
+"3.33333333333333314829616256247390992939472198486328125e-01"
+
+julia> repr(big(1/3), context=:compact => true)
+"3.33333e-01"
+
 ```
 """
-function repr(x)
-    s = IOBuffer()
-    show(s, x)
-    String(take!(s))
-end
-
-function repr(x, context::Pair{Symbol}...)
-    s = IOBuffer()
-    show(IOContext(s, context...), x)
-    String(take!(s))
-end
+repr(x; context=nothing) = sprint(show, x; context=context)
 
 # IOBuffer views of a (byte)string:
 
@@ -203,11 +218,12 @@ IOBuffer(s::SubString{String}) = IOBuffer(view(unsafe_wrap(Vector{UInt8}, s.stri
 # join is implemented using IO
 
 """
-    join(io::IO, strings, delim, [last])
+    join([io::IO,] strings, delim, [last])
 
 Join an array of `strings` into a single string, inserting the given delimiter between
 adjacent strings. If `last` is given, it will be used instead of `delim` between the last
-two strings. For example,
+two strings. If `io` is given, the result is written to `io` rather than returned as
+as a `String`.
 
 # Examples
 ```jldoctest
@@ -219,23 +235,30 @@ julia> join(["apples", "bananas", "pineapples"], ", ", " and ")
 via `print(io::IOBuffer, x)`. `strings` will be printed to `io`.
 """
 function join(io::IO, strings, delim, last)
-    a = Iterators.Stateful(strings)
-    isempty(a) && return
-    print(io, popfirst!(a))
-    for str in a
-        print(io, isempty(a) ? last : delim)
+    first = true
+    local prev
+    for str in strings
+        if @isdefined prev
+            first ? (first = false) : print(io, delim)
+            print(io, prev)
+        end
+        prev = str
+    end
+    if @isdefined prev
+        first || print(io, last)
+        print(io, prev)
+    end
+    nothing
+end
+function join(io::IO, strings, delim="")
+    # Specialization of the above code when delim==last,
+    # which lets us emit (compile) less code
+    first = true
+    for str in strings
+        first ? (first = false) : print(io, delim)
         print(io, str)
     end
 end
-
-function join(io::IO, strings, delim)
-    a = Iterators.Stateful(strings)
-    for str in a
-        print(io, str)
-        !isempty(a) && print(io, delim)
-    end
-end
-join(io::IO, strings) = join(io, strings, "")
 
 join(strings) = sprint(join, strings)
 join(strings, delim) = sprint(join, strings, delim)
@@ -243,26 +266,43 @@ join(strings, delim, last) = sprint(join, strings, delim, last)
 
 ## string escaping & unescaping ##
 
-need_full_hex(c::Union{Nothing, Char}) = c !== nothing && isxdigit(c)
-escape_nul(c::Union{Nothing, Char}) =
+need_full_hex(c::Union{Nothing, AbstractChar}) = c !== nothing && isxdigit(c)
+escape_nul(c::Union{Nothing, AbstractChar}) =
     (c !== nothing && '0' <= c <= '7') ? "\\x00" : "\\0"
 
 """
-    escape_string(str::AbstractString[, esc::AbstractString]) -> AbstractString
+    escape_string(str::AbstractString[, esc])::AbstractString
+    escape_string(io, str::AbstractString[, esc::])::Nothing
 
-General escaping of traditional C and Unicode escape sequences.
-Any characters in `esc` are also escaped (with a backslash).
-The reverse is [`unescape_string`](@ref).
-"""
-escape_string(s::AbstractString, esc::AbstractString) = sprint(escape_string, s, esc, sizehint=lastindex(s))
-escape_string(s::AbstractString) = sprint(escape_string, s, "\"", sizehint=lastindex(s))
+General escaping of traditional C and Unicode escape sequences. The first form returns the
+escaped string, the second prints the result to `io`.
 
-"""
-    escape_string(io, str::AbstractString[, esc::AbstractString]) -> Nothing
+Backslashes (`\\`) are escaped with a double-backslash (`"\\\\"`). Non-printable
+characters are escaped either with their standard C escape codes, `"\\0"` for NUL (if
+unambiguous), unicode code point (`"\\u"` prefix) or hex (`"\\x"` prefix).
 
-Escape sequences in `str` and print result to `io`. See also [`unescape_string`](@ref).
+The optional `esc` argument specifies any additional characters that should also be
+escaped by a prepending backslash (`\"` is also escaped by default in the first form).
+
+# Examples
+```jldoctest
+julia> escape_string("aaa\\nbbb")
+"aaa\\\\nbbb"
+
+julia> escape_string("\\xfe\\xff") # invalid utf-8
+"\\\\xfe\\\\xff"
+
+julia> escape_string(string('\\u2135','\\0')) # unambiguous
+"ℵ\\\\0"
+
+julia> escape_string(string('\\u2135','\\0','0')) # \\0 would be ambiguous
+"ℵ\\\\x000"
+```
+
+## See also
+[`unescape_string`](@ref) for the reverse operation.
 """
-function escape_string(io, s::AbstractString, esc::AbstractString="")
+function escape_string(io::IO, s::AbstractString, esc="")
     a = Iterators.Stateful(s)
     for c in a
         if c in esc
@@ -271,47 +311,64 @@ function escape_string(io, s::AbstractString, esc::AbstractString="")
             c == '\0'          ? print(io, escape_nul(peek(a))) :
             c == '\e'          ? print(io, "\\e") :
             c == '\\'          ? print(io, "\\\\") :
-            c in esc           ? print(io, '\\', c) :
             '\a' <= c <= '\r'  ? print(io, '\\', "abtnvfr"[Int(c)-6]) :
             isprint(c)         ? print(io, c) :
-                                 print(io, "\\x", hex(c, 2))
+                                 print(io, "\\x", string(UInt32(c), base = 16, pad = 2))
         elseif !isoverlong(c) && !ismalformed(c)
             isprint(c)         ? print(io, c) :
-            c <= '\x7f'        ? print(io, "\\x", hex(c, 2)) :
-            c <= '\uffff'      ? print(io, "\\u", hex(c, need_full_hex(peek(a)) ? 4 : 2)) :
-                                 print(io, "\\U", hex(c, need_full_hex(peek(a)) ? 8 : 4))
+            c <= '\x7f'        ? print(io, "\\x", string(UInt32(c), base = 16, pad = 2)) :
+            c <= '\uffff'      ? print(io, "\\u", string(UInt32(c), base = 16, pad = need_full_hex(peek(a)) ? 4 : 2)) :
+                                 print(io, "\\U", string(UInt32(c), base = 16, pad = need_full_hex(peek(a)) ? 8 : 4))
         else # malformed or overlong
             u = bswap(reinterpret(UInt32, c))
             while true
-                print(io, "\\x", hex(u % UInt8, 2))
+                print(io, "\\x", string(u % UInt8, base = 16, pad = 2))
                 (u >>= 8) == 0 && break
             end
         end
     end
 end
 
+escape_string(s::AbstractString, esc=('\"',)) = sprint(escape_string, s, esc, sizehint=lastindex(s))
+
 function print_quoted(io, s::AbstractString)
     print(io, '"')
-    escape_string(io, s, "\"\$") #"# work around syntax highlighting problem
+    escape_string(io, s, ('\"','$')) #"# work around syntax highlighting problem
     print(io, '"')
 end
 
 # general unescaping of traditional C and Unicode escape sequences
 
 # TODO: handle unescaping invalid UTF-8 sequences
-
 """
-    unescape_string(str::AbstractString) -> AbstractString
+    unescape_string(str::AbstractString)::AbstractString
+    unescape_string(io, str::AbstractString)::Nothing
 
-General unescaping of traditional C and Unicode escape sequences. Reverse of
+General unescaping of traditional C and Unicode escape sequences. The first form returns
+the escaped string, the second prints the result to `io`.
+
+The following escape sequences are recognised:
+ - Escaped backslash (`\\\\`)
+ - Escaped double-quote (`\\\"`)
+ - Standard C escape sequences (`\\a`, `\\b`, `\\t`, `\\n`, `\\v`, `\\f`, `\\r`, `\\e`)
+ - Unicode code points (`\\u` or `\\U` prefixes with 1-4 trailing hex digits)
+ - Hex bytes (`\\x` with 1-2 trailing hex digits)
+ - Octal bytes (`\\` with 1-3 trailing octal digits)
+
+# Examples
+```jldoctest
+julia> unescape_string("aaa\\\\nbbb") # C escape sequence
+"aaa\\nbbb"
+
+julia> unescape_string("\\\\u03c0") # unicode
+"π"
+
+julia> unescape_string("\\\\101") # octal
+"A"
+```
+
+## See also
 [`escape_string`](@ref).
-"""
-unescape_string(s::AbstractString) = sprint(unescape_string, s, sizehint=lastindex(s))
-
-"""
-    unescape_string(io, str::AbstractString) -> Nothing
-
-Unescapes sequences and prints result to `io`. See also [`escape_string`](@ref).
 """
 function unescape_string(io, s::AbstractString)
     a = Iterators.Stateful(s)
@@ -359,13 +416,17 @@ function unescape_string(io, s::AbstractString)
                           c == 'v' ? '\v' :
                           c == 'f' ? '\f' :
                           c == 'r' ? '\r' :
-                          c == 'e' ? '\e' : c)
+                          c == 'e' ? '\e' :
+                          (c == '\\' || c == '"') ? c :
+                          throw(ArgumentError("invalid escape sequence \\$c")))
             end
         else
             print(io, c)
         end
     end
 end
+unescape_string(s::AbstractString) = sprint(unescape_string, s, sizehint=lastindex(s))
+
 
 macro b_str(s)
     v = codeunits(unescape_string(s))
@@ -402,13 +463,22 @@ macro raw_str(s); s; end
 ## multiline strings ##
 
 """
-    indentation(str::AbstractString; tabwidth=8)
+    indentation(str::AbstractString; tabwidth=8) -> (Int, Bool)
 
-Calculate the width of leading blank space, and also return if string is blank
+Calculate the width of leading white space. Return the width and a flag to indicate
+if the string is empty.
 
-Returns:
+# Examples
+```jldoctest
+julia> Base.indentation("")
+(0, true)
 
-* width of leading whitespace, flag if string is totally blank
+julia> Base.indentation("  a")
+(2, false)
+
+julia> Base.indentation("\\ta"; tabwidth=3)
+(3, false)
+```
 """
 function indentation(str::AbstractString; tabwidth=8)
     count = 0
@@ -427,17 +497,21 @@ end
 """
     unindent(str::AbstractString, indent::Int; tabwidth=8)
 
-Remove leading indentation from string
+Remove leading indentation from string.
 
-Returns:
+# Examples
+```jldoctest
+julia> Base.unindent("   a\\n   b", 2)
+" a\\n b"
 
-* `String` of multiline string, with leading indentation of `indent` removed
+julia> Base.unindent("\\ta\\n\\tb", 2, tabwidth=8)
+"      a\\n      b"
+```
 """
 function unindent(str::AbstractString, indent::Int; tabwidth=8)
     indent == 0 && return str
     # Note: this loses the type of the original string
-    buf = IOBuffer(StringVector(sizeof(str)), true, true)
-    truncate(buf,0)
+    buf = IOBuffer(sizehint=sizeof(str))
     cutting = true
     col = 0     # current column (0 based)
     for ch in str
@@ -449,51 +523,51 @@ function unindent(str::AbstractString, indent::Int; tabwidth=8)
             elseif ch == '\n'
                 # Now we need to output enough indentation
                 for i = 1:col-indent
-                    write(buf, ' ')
+                    print(buf, ' ')
                 end
                 col = 0
-                write(buf, '\n')
+                print(buf, '\n')
             else
                 cutting = false
                 # Now we need to output enough indentation to get to
                 # correct place
                 for i = 1:col-indent
-                    write(buf, ' ')
+                    print(buf, ' ')
                 end
                 col += 1
-                write(buf, ch)
+                print(buf, ch)
             end
         elseif ch == '\t'       # Handle internal tabs
             upd = div(col + tabwidth, tabwidth) * tabwidth
             # output the number of spaces that would have been seen
             # with original indentation
             for i = 1:(upd-col)
-                write(buf, ' ')
+                print(buf, ' ')
             end
             col = upd
         elseif ch == '\n'
             cutting = true
             col = 0
-            write(buf, '\n')
+            print(buf, '\n')
         else
             col += 1
-            write(buf, ch)
+            print(buf, ch)
         end
     end
     # If we were still "cutting" when we hit the end of the string,
     # we need to output the right number of spaces for the indentation
     if cutting
         for i = 1:col-indent
-            write(buf, ' ')
+            print(buf, ' ')
         end
     end
     String(take!(buf))
 end
 
-function String(chars::AbstractVector{Char})
+function String(chars::AbstractVector{<:AbstractChar})
     sprint(sizehint=length(chars)) do io
         for c in chars
-            write(io, c)
+            print(io, c)
         end
     end
 end

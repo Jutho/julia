@@ -89,28 +89,37 @@ function NamedTuple{names}(nt::NamedTuple) where {names}
     end
 end
 
+NamedTuple{names, T}(itr) where {names, T <: Tuple} = NamedTuple{names, T}(T(itr))
+NamedTuple{names}(itr) where {names} = NamedTuple{names}(Tuple(itr))
+
 end # if Base
 
 length(t::NamedTuple) = nfields(t)
-start(t::NamedTuple) = 1
-done(t::NamedTuple, iter) = iter > nfields(t)
-next(t::NamedTuple, iter) = (getfield(t, iter), iter + 1)
+iterate(t::NamedTuple, iter=1) = iter > nfields(t) ? nothing : (getfield(t, iter), iter + 1)
 firstindex(t::NamedTuple) = 1
 lastindex(t::NamedTuple) = nfields(t)
 getindex(t::NamedTuple, i::Int) = getfield(t, i)
 getindex(t::NamedTuple, i::Symbol) = getfield(t, i)
-indexed_next(t::NamedTuple, i::Int, state) = (getfield(t, i), i+1)
+indexed_iterate(t::NamedTuple, i::Int, state=1) = (getfield(t, i), i+1)
 isempty(::NamedTuple{()}) = true
 isempty(::NamedTuple) = false
 
-promote_typejoin(::Type{NamedTuple{n, S}}, ::Type{NamedTuple{n, T}}) where {n, S, T} =
-    NamedTuple{n, promote_typejoin(S, T)}
-
-convert(::Type{NamedTuple{names,T}}, nt::NamedTuple{names,T}) where {names,T} = nt
+convert(::Type{NamedTuple{names,T}}, nt::NamedTuple{names,T}) where {names,T<:Tuple} = nt
 convert(::Type{NamedTuple{names}}, nt::NamedTuple{names}) where {names} = nt
 
-function convert(::Type{NamedTuple{names,T}}, nt::NamedTuple{names}) where {names,T}
+function convert(::Type{NamedTuple{names,T}}, nt::NamedTuple{names}) where {names,T<:Tuple}
     NamedTuple{names,T}(T(nt))
+end
+
+if nameof(@__MODULE__) === :Base
+    function Tuple(nt::NamedTuple{names}) where {names}
+        if @generated
+            return Expr(:tuple, Any[:(getfield(nt, $(QuoteNode(n)))) for n in names]...)
+        else
+            return tuple(nt...)
+        end
+    end
+    (::Type{T})(nt::NamedTuple) where {T <: Tuple} = convert(T, Tuple(nt))
 end
 
 function show(io::IO, t::NamedTuple)
@@ -128,9 +137,13 @@ function show(io::IO, t::NamedTuple)
     if n == 0
         print(io, "NamedTuple()")
     else
+        typeinfo = get(io, :typeinfo, Any)
         print(io, "(")
         for i = 1:n
-            print(io, fieldname(typeof(t),i), " = "); show(io, getfield(t, i))
+            print(io, fieldname(typeof(t),i), " = ")
+            show(IOContext(io, :typeinfo =>
+                           t isa typeinfo <: NamedTuple ? fieldtype(typeinfo, i) : Any),
+                 getfield(t, i))
             if n == 1
                 print(io, ",")
             elseif i < n
@@ -225,6 +238,8 @@ function merge(a::NamedTuple{an}, b::NamedTuple{bn}) where {an, bn}
 end
 
 merge(a::NamedTuple{()}, b::NamedTuple) = b
+
+merge(a::NamedTuple, b::Iterators.Pairs{<:Any,<:Any,<:Any,<:NamedTuple}) = merge(a, b.data)
 
 """
     merge(a::NamedTuple, iterable)

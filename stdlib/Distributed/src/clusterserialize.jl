@@ -10,7 +10,7 @@ import Serialization: object_number, lookup_object_number, remember_object
 mutable struct ClusterSerializer{I<:IO} <: AbstractSerializer
     io::I
     counter::Int
-    table::IdDict
+    table::IdDict{Any,Any}
     pending_refs::Vector{Int}
 
     pid::Int                                     # Worker we are connected to.
@@ -50,18 +50,18 @@ end
 
 function remember_object(s::ClusterSerializer, @nospecialize(o), n::UInt64)
     known_object_data[n] = o
-    if isa(o, TypeName) && !haskey(object_numbers, o)
+    if isa(o, Core.TypeName) && !haskey(object_numbers, o)
         # set up reverse mapping for serialize
         object_numbers[o] = n
     end
     return nothing
 end
 
-function deserialize(s::ClusterSerializer, ::Type{TypeName})
+function deserialize(s::ClusterSerializer, ::Type{Core.TypeName})
     full_body_sent = deserialize(s)
     number = read(s.io, UInt64)
     if !full_body_sent
-        tn = lookup_object_number(s, number)::TypeName
+        tn = lookup_object_number(s, number)::Core.TypeName
         remember_object(s, tn, number)
         deserialize_cycle(s, tn)
     else
@@ -73,7 +73,7 @@ function deserialize(s::ClusterSerializer, ::Type{TypeName})
     return tn
 end
 
-function serialize(s::ClusterSerializer, t::TypeName)
+function serialize(s::ClusterSerializer, t::Core.TypeName)
     serialize_cycle(s, t) && return
     writetag(s.io, TYPENAME_TAG)
 
@@ -173,10 +173,11 @@ function deserialize_global_from_main(s::ClusterSerializer, sym)
     sym_isconst = deserialize(s)
     v = deserialize(s)
     if sym_isconst
-        @eval Main const $sym = $v
+        ccall(:jl_set_const, Cvoid, (Any, Any, Any), Main, sym, v)
     else
-        @eval Main $sym = $v
+        ccall(:jl_set_global, Cvoid, (Any, Any, Any), Main, sym, v)
     end
+    return nothing
 end
 
 function delete_global_tracker(s::ClusterSerializer, v)
@@ -212,6 +213,7 @@ function original_ex(s::ClusterSerializer, ex_str, remote_stktrace)
     local pid_str = ""
     try
         pid_str = string(" from worker ", worker_id_from_socket(s.io))
+    catch
     end
 
     stk_str = remote_stktrace ? "Remote" : "Local"

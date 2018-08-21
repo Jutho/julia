@@ -15,7 +15,7 @@ n = 10
 n1 = div(n, 2)
 n2 = 2*n1
 
-srand(1234321)
+Random.seed!(1234321)
 
 @testset "Matrix condition number" begin
     ainit = rand(n,n)
@@ -47,7 +47,7 @@ bimg  = randn(n,2)/2
     @testset "Positive definiteness" begin
         @test !isposdef(ainit)
         @test isposdef(apd)
-        if eltya != Int # cannot perform cholfact! for Matrix{Int}
+        if eltya != Int # cannot perform cholesky! for Matrix{Int}
             @test !isposdef!(copy(ainit))
             @test isposdef!(copy(apd))
         end
@@ -72,7 +72,9 @@ bimg  = randn(n,2)/2
                 @test norm(a[:,1:n1]'a15null,Inf) ≈ zero(eltya) atol=300ε
                 @test norm(a15null'a[:,1:n1],Inf) ≈ zero(eltya) atol=400ε
                 @test size(nullspace(b), 2) == 0
+                @test size(nullspace(b, 100*εb), 2) == 0
                 @test nullspace(zeros(eltya,n)) == Matrix(I, 1, 1)
+                @test nullspace(zeros(eltya,n), 0.1) == Matrix(I, 1, 1)
             end
         end
     end # for eltyb
@@ -83,7 +85,7 @@ bimg  = randn(n,2)/2
             @test a[:,1:n1]*pinva15*a[:,1:n1] ≈ a[:,1:n1]
             @test pinva15*a[:,1:n1]*pinva15 ≈ pinva15
 
-            @test size(pinv(Matrix{eltya}(uninitialized,0,0))) == (0,0)
+            @test size(pinv(Matrix{eltya}(undef,0,0))) == (0,0)
         end
 
         @testset "Lyapunov/Sylvester" begin
@@ -139,14 +141,14 @@ bimg  = randn(n,2)/2
     end
 end # for eltya
 
-@testset "test triu/tril bounds checking" begin
+@testset "test out of bounds triu/tril" begin
     local m, n = 5, 7
     ainit = rand(m, n)
     for a in (copy(ainit), view(ainit, 1:m, 1:n))
-        @test_throws ArgumentError triu(a, -m)
-        @test_throws ArgumentError triu(a, n + 2)
-        @test_throws ArgumentError tril(a, -m - 2)
-        @test_throws ArgumentError tril(a, n)
+        @test triu(a, -m) == a
+        @test triu(a, n + 2) == zero(a)
+        @test tril(a, -m - 2) == zero(a)
+        @test tril(a, n) == a
     end
 end
 
@@ -234,18 +236,18 @@ end
             end
         end
 
-        @testset "Matrix (Operator)" begin
+        @testset "Matrix (Operator) opnorm" begin
             A = fill(elty(1),10,10)
             As = view(A,1:5,1:5)
-            @test norm(A, 1) ≈ 10
-            elty <: Union{BigFloat,Complex{BigFloat},BigInt} || @test norm(A, 2) ≈ 10
-            @test norm(A, Inf) ≈ 10
-            @test norm(As, 1) ≈ 5
-            elty <: Union{BigFloat,Complex{BigFloat},BigInt} || @test norm(As, 2) ≈ 5
-            @test norm(As, Inf) ≈ 5
+            @test opnorm(A, 1) ≈ 10
+            elty <: Union{BigFloat,Complex{BigFloat},BigInt} || @test opnorm(A, 2) ≈ 10
+            @test opnorm(A, Inf) ≈ 10
+            @test opnorm(As, 1) ≈ 5
+            elty <: Union{BigFloat,Complex{BigFloat},BigInt} || @test opnorm(As, 2) ≈ 5
+            @test opnorm(As, Inf) ≈ 5
         end
 
-        @testset "Absolute homogeneity, triangle inequality, & vecnorm" begin
+        @testset "Absolute homogeneity, triangle inequality, & norm" begin
             for i = 1:10
                 Ainit = elty <: Integer ? convert(Matrix{elty}, rand(1:10, mmat, nmat)) :
                         elty <: Complex ? convert(Matrix{elty}, complex.(randn(mmat, nmat), randn(mmat, nmat))) :
@@ -267,9 +269,9 @@ end
                     elty <: Union{BigFloat,Complex{BigFloat},BigInt} || @test norm(A + B) <= norm(A) + norm(B) # two is default
                     @test norm(A + B,Inf) <= norm(A,Inf) + norm(B,Inf)
 
-                    # vecnorm:
-                    for p = -2:3
-                        @test norm(reshape(A, length(A)), p) == vecnorm(A, p)
+                    # norm
+                    for p in (-Inf, Inf, (-2:3)...)
+                        @test norm(A, p) == norm(vec(A), p)
                     end
                 end
             end
@@ -338,7 +340,7 @@ end
     dim=2
     S=zeros(Complex,dim,dim)
     T=zeros(Complex,dim,dim)
-    T[:] = 1
+    fill!(T, 1)
     z = 2.5 + 1.5im
     S[1] = z
     @test S*T == [z z; 0 0]
@@ -380,7 +382,7 @@ end
         @test exp(A5) ≈ eA5
 
         # Hessenberg
-        @test hessfact(A1).H ≈ convert(Matrix{elty},
+        @test hessenberg(A1).H ≈ convert(Matrix{elty},
                                                  [4.000000000000000  -1.414213562373094  -1.414213562373095
                                                   -1.414213562373095   4.999999999999996  -0.000000000000000
                                                   0  -0.000000000000002   3.000000000000000])
@@ -575,23 +577,23 @@ end
             @test coth(acoth(coth(A))) ≈ coth(A)
 
             # Definition of principal values (Aprahamian & Higham, 2016, pp. 4-5)
-            abstol = sqrt(eps(real(elty))) * vecnorm(acosh(A))
+            abstol = sqrt(eps(real(elty))) * norm(acosh(A))
             @test all(z -> (0 < real(z) < π ||
                             abs(real(z)) < abstol && imag(z) >= 0 ||
                             abs(real(z) - π) < abstol && imag(z) <= 0),
-                      eigfact(acos(A)).values)
+                      eigen(acos(A)).values)
             @test all(z -> (-π/2 < real(z) < π/2 ||
                             abs(real(z) + π/2) < abstol && imag(z) >= 0 ||
                             abs(real(z) - π/2) < abstol && imag(z) <= 0),
-                      eigfact(asin(A)).values)
+                      eigen(asin(A)).values)
             @test all(z -> (-π < imag(z) < π && real(z) > 0 ||
                             0 <= imag(z) < π && abs(real(z)) < abstol ||
                             abs(imag(z) - π) < abstol && real(z) >= 0),
-                      eigfact(acosh(A)).values)
+                      eigen(acosh(A)).values)
             @test all(z -> (-π/2 < imag(z) < π/2 ||
                             abs(imag(z) + π/2) < abstol && real(z) <= 0 ||
                             abs(imag(z) - π/2) < abstol && real(z) <= 0),
-                      eigfact(asinh(A)).values)
+                      eigen(asinh(A)).values)
         end
     end
 end
@@ -649,7 +651,7 @@ end
           2  6 10
           3  7 11
           4  8 12 ]
-    @test_throws ArgumentError diag(A, -5)
+    @test diag(A,-5) == []
     @test diag(A,-4) == []
     @test diag(A,-3) == [4]
     @test diag(A,-2) == [3,8]
@@ -658,21 +660,21 @@ end
     @test diag(A, 1) == [5,10]
     @test diag(A, 2) == [9]
     @test diag(A, 3) == []
-    @test_throws ArgumentError diag(A, 4)
+    @test diag(A, 4) == []
 
     @test diag(zeros(0,0)) == []
-    @test_throws ArgumentError diag(zeros(0,0),1)
-    @test_throws ArgumentError diag(zeros(0,0),-1)
+    @test diag(zeros(0,0),1) == []
+    @test diag(zeros(0,0),-1) == []
 
     @test diag(zeros(1,0)) == []
     @test diag(zeros(1,0),-1) == []
-    @test_throws ArgumentError diag(zeros(1,0),1)
-    @test_throws ArgumentError diag(zeros(1,0),-2)
+    @test diag(zeros(1,0),1) == []
+    @test diag(zeros(1,0),-2) == []
 
     @test diag(zeros(0,1)) == []
     @test diag(zeros(0,1),1) == []
-    @test_throws ArgumentError diag(zeros(0,1),-1)
-    @test_throws ArgumentError diag(zeros(0,1),2)
+    @test diag(zeros(0,1),-1) == []
+    @test diag(zeros(0,1),2) == []
 end
 
 @testset "Matrix to real power" for elty in (Float64, Complex{Float64})
@@ -794,13 +796,13 @@ end
         r = (elty <: Complex ? adjoint : transpose)(rand(elty, 5))
         cm = rand(elty, 5, 1)
         rm = rand(elty, 1, 5)
-        @testset "inner prodcuts" begin
+        @testset "dot products" begin
             test_div_pinv_consistency(r, c)
             test_div_pinv_consistency(rm, c)
             test_div_pinv_consistency(r, cm)
             test_div_pinv_consistency(rm, cm)
         end
-        @testset "outer prodcuts" begin
+        @testset "outer products" begin
             test_div_pinv_consistency(c, r)
             test_div_pinv_consistency(cm, rm)
         end
@@ -832,9 +834,6 @@ end
     @test strides(A) == (1,10)
     @test strides(B) == (2,20)
 
-    @test_deprecated strides(1:5)
-    @test_deprecated stride(1:5,1)
-
     for M in (a, b, A, B)
         @inferred strides(M)
         strides_M = strides(M)
@@ -843,6 +842,21 @@ end
             @test _stride == stride(M, i)
         end
     end
+end
+
+@testset "inverse of Adjoint" begin
+    A = randn(n, n)
+
+    @test inv(A')*A'                     ≈ I
+    @test inv(transpose(A))*transpose(A) ≈ I
+
+    B = complex.(A, randn(n, n))
+    B = B + transpose(B)
+
+    # The following two cases fail because ldiv!(F::Adjoint/Transpose{BunchKaufman},b)
+    # isn't implemented yet
+    @test_broken inv(B')*B'                     ≈ I
+    @test_broken inv(transpose(B))*transpose(B) ≈ I
 end
 
 end # module TestDense

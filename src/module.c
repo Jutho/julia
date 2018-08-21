@@ -35,6 +35,7 @@ JL_DLLEXPORT jl_module_t *jl_new_module(jl_sym_t *name)
         m->build_id++; // build id 0 is invalid
     m->primary_world = 0;
     m->counter = 0;
+    m->nospecialize = 0;
     htable_new(&m->bindings, 0);
     arraylist_new(&m->usings, 0);
     if (jl_core_module) {
@@ -61,6 +62,11 @@ JL_DLLEXPORT jl_value_t *jl_f_new_module(jl_sym_t *name, uint8_t std_imports)
     if (std_imports) jl_add_standard_imports(m);
     JL_GC_POP();
     return (jl_value_t*)m;
+}
+
+JL_DLLEXPORT void jl_set_module_nospecialize(jl_module_t *self, int on)
+{
+    self->nospecialize = (on ? -1 : 0);
 }
 
 JL_DLLEXPORT void jl_set_istopmod(jl_module_t *self, uint8_t isprimary)
@@ -171,6 +177,44 @@ typedef struct _modstack_t {
     struct _modstack_t *prev;
 } modstack_t;
 
+static jl_binding_t *jl_get_binding_(jl_module_t *m, jl_sym_t *var, modstack_t *st);
+
+// find a binding from a module's `usings` list
+static jl_binding_t *using_resolve_binding(jl_module_t *m, jl_sym_t *var, modstack_t *st, int warn)
+{
+    jl_binding_t *b = NULL;
+    jl_module_t *owner = NULL;
+    for(int i=(int)m->usings.len-1; i >= 0; --i) {
+        jl_module_t *imp = (jl_module_t*)m->usings.items[i];
+        jl_binding_t *tempb = (jl_binding_t*)ptrhash_get(&imp->bindings, var);
+        if (tempb != HT_NOTFOUND && tempb->exportp) {
+            tempb = jl_get_binding_(imp, var, st);
+            if (tempb == NULL || tempb->owner == NULL)
+                // couldn't resolve; try next using (see issue #6105)
+                continue;
+            if (owner != NULL && tempb->owner != b->owner &&
+                !tempb->deprecated && !b->deprecated &&
+                !(tempb->constp && tempb->value && b->constp && b->value == tempb->value)) {
+                if (warn) {
+                    jl_printf(JL_STDERR,
+                              "WARNING: both %s and %s export \"%s\"; uses of it in module %s must be qualified\n",
+                              jl_symbol_name(owner->name),
+                              jl_symbol_name(imp->name), jl_symbol_name(var),
+                              jl_symbol_name(m->name));
+                    // mark this binding resolved, to avoid repeating the warning
+                    (void)jl_get_binding_wr(m, var, 0);
+                }
+                return NULL;
+            }
+            if (owner == NULL || !tempb->deprecated) {
+                owner = imp;
+                b = tempb;
+            }
+        }
+    }
+    return b;
+}
+
 // get binding for reading. might return NULL for unbound.
 static jl_binding_t *jl_get_binding_(jl_module_t *m, jl_sym_t *var, modstack_t *st)
 {
@@ -185,34 +229,8 @@ static jl_binding_t *jl_get_binding_(jl_module_t *m, jl_sym_t *var, modstack_t *
     }
     jl_binding_t *b = (jl_binding_t*)ptrhash_get(&m->bindings, var);
     if (b == HT_NOTFOUND || b->owner == NULL) {
-        jl_module_t *owner = NULL;
-        for(int i=(int)m->usings.len-1; i >= 0; --i) {
-            jl_module_t *imp = (jl_module_t*)m->usings.items[i];
-            jl_binding_t *tempb = (jl_binding_t*)ptrhash_get(&imp->bindings, var);
-            if (tempb != HT_NOTFOUND && tempb->exportp) {
-                tempb = jl_get_binding_(imp, var, &top);
-                if (tempb == NULL || tempb->owner == NULL)
-                    // couldn't resolve; try next using (see issue #6105)
-                    continue;
-                if (owner != NULL && tempb->owner != b->owner &&
-                    !tempb->deprecated && !b->deprecated &&
-                    !(tempb->constp && tempb->value && b->constp && b->value == tempb->value)) {
-                    jl_printf(JL_STDERR,
-                              "WARNING: both %s and %s export \"%s\"; uses of it in module %s must be qualified\n",
-                              jl_symbol_name(owner->name),
-                              jl_symbol_name(imp->name), jl_symbol_name(var),
-                              jl_symbol_name(m->name));
-                    // mark this binding resolved, to avoid repeating the warning
-                    (void)jl_get_binding_wr(m, var, 0);
-                    return NULL;
-                }
-                if (owner == NULL || !tempb->deprecated) {
-                    owner = imp;
-                    b = tempb;
-                }
-            }
-        }
-        if (owner != NULL) {
+        b = using_resolve_binding(m, var, &top, 1);
+        if (b != NULL) {
             // do a full import to prevent the result of this lookup
             // from changing, for example if this var is assigned to
             // later.
@@ -224,6 +242,18 @@ static jl_binding_t *jl_get_binding_(jl_module_t *m, jl_sym_t *var, modstack_t *
     if (b->owner != m)
         return jl_get_binding_(b->owner, var, &top);
     return b;
+}
+
+// get owner of binding when accessing m.var, without resolving the binding
+JL_DLLEXPORT jl_value_t *jl_binding_owner(jl_module_t *m, jl_sym_t *var)
+{
+    jl_binding_t *b = (jl_binding_t*)ptrhash_get(&m->bindings, var);
+    if (b == HT_NOTFOUND || b->owner == NULL) {
+        b = using_resolve_binding(m, var, NULL, 0);
+        if (b == NULL || b->owner == NULL)
+            return jl_nothing;
+    }
+    return (jl_value_t*)b->owner;
 }
 
 JL_DLLEXPORT jl_binding_t *jl_get_binding(jl_module_t *m, jl_sym_t *var)
@@ -275,8 +305,6 @@ JL_DLLEXPORT int jl_is_imported(jl_module_t *m, jl_sym_t *s)
 static void module_import_(jl_module_t *to, jl_module_t *from, jl_sym_t *s,
                            int explici)
 {
-    if (to == from)
-        return;
     jl_binding_t *b = jl_get_binding(from, s);
     if (b == NULL) {
         jl_printf(JL_STDERR,
@@ -361,18 +389,6 @@ JL_DLLEXPORT void jl_module_import(jl_module_t *to, jl_module_t *from,
 JL_DLLEXPORT void jl_module_use(jl_module_t *to, jl_module_t *from, jl_sym_t *s)
 {
     module_import_(to, from, s, 0);
-}
-
-JL_DLLEXPORT void jl_module_importall(jl_module_t *to, jl_module_t *from)
-{
-    void **table = from->bindings.table;
-    for(size_t i=1; i < from->bindings.size; i+=2) {
-        if (table[i] != HT_NOTFOUND) {
-            jl_binding_t *b = (jl_binding_t*)table[i];
-            if (b->exportp && (b->owner==from || b->imported))
-                jl_module_import(to, from, b->name);
-        }
-    }
 }
 
 JL_DLLEXPORT void jl_module_using(jl_module_t *to, jl_module_t *from)
@@ -526,23 +542,26 @@ void jl_binding_deprecation_warning(jl_module_t *m, jl_binding_t *b)
                       jl_symbol_name(b->owner->name), jl_symbol_name(b->name));
             dep_message_binding = jl_get_dep_message_binding(b->owner, b);
         }
-        else
+        else {
             jl_printf(JL_STDERR, "%s is deprecated", jl_symbol_name(b->name));
+        }
 
         if (dep_message_binding && dep_message_binding->value) {
             if (jl_isa(dep_message_binding->value, (jl_value_t*)jl_string_type)) {
                 jl_uv_puts(JL_STDERR, jl_string_data(dep_message_binding->value),
                     jl_string_len(dep_message_binding->value));
-            } else {
+            }
+            else {
                 jl_static_show(JL_STDERR, dep_message_binding->value);
             }
-        } else {
+        }
+        else {
             jl_value_t *v = b->value;
             if (v) {
                 if (jl_is_type(v) || jl_is_module(v)) {
                     jl_printf(JL_STDERR, ", use ");
                     jl_static_show(JL_STDERR, v);
-                    jl_printf(JL_STDERR, " instead");
+                    jl_printf(JL_STDERR, " instead.");
                 }
                 else {
                     jl_methtable_t *mt = jl_gf_mtable(v);
@@ -554,12 +573,12 @@ void jl_binding_deprecation_warning(jl_module_t *m, jl_binding_t *b)
                             jl_printf(JL_STDERR, ".");
                         }
                         jl_printf(JL_STDERR, "%s", jl_symbol_name(mt->name));
-                        jl_printf(JL_STDERR, " instead");
+                        jl_printf(JL_STDERR, " instead.");
                     }
                 }
             }
         }
-        jl_printf(JL_STDERR, ".\n");
+        jl_printf(JL_STDERR, "\n");
 
         if (jl_options.depwarn != JL_OPTIONS_DEPWARN_ERROR) {
             if (jl_lineno == 0) {
@@ -607,19 +626,6 @@ JL_DLLEXPORT void jl_declare_constant(jl_binding_t *b)
     b->constp = 1;
 }
 
-JL_DLLEXPORT jl_value_t *jl_get_current_module(void)
-{
-    jl_ptls_t ptls = jl_get_ptls_states();
-    return (jl_value_t*)ptls->current_module;
-}
-
-JL_DLLEXPORT void jl_set_current_module(jl_value_t *m)
-{
-    jl_ptls_t ptls = jl_get_ptls_states();
-    assert(jl_typeis(m, jl_module_type));
-    ptls->current_module = (jl_module_t*)m;
-}
-
 JL_DLLEXPORT jl_value_t *jl_module_usings(jl_module_t *m)
 {
     jl_array_t *a = jl_alloc_array_1d(jl_array_any_type, 0);
@@ -645,7 +651,7 @@ JL_DLLEXPORT jl_value_t *jl_module_names(jl_module_t *m, int all, int imported)
             int hidden = jl_symbol_name(b->name)[0]=='#';
             if ((b->exportp ||
                  (imported && b->imported) ||
-                 ((b->owner == m) && (all || m == jl_main_module))) &&
+                 (b->owner == m && !b->imported && (all || m == jl_main_module))) &&
                 (all || (!b->deprecated && !hidden))) {
                 jl_array_grow_end(a, 1);
                 //XXX: change to jl_arrayset if array storage allocation for Array{Symbols,1} changes:
@@ -665,7 +671,7 @@ JL_DLLEXPORT jl_uuid_t jl_module_uuid(jl_module_t* m) { return m->uuid; }
 // TODO: make this part of the module constructor and read-only?
 JL_DLLEXPORT void jl_set_module_uuid(jl_module_t *m, jl_uuid_t uuid) { m->uuid = uuid; }
 
-int jl_is_submodule(jl_module_t *child, jl_module_t *parent)
+int jl_is_submodule(jl_module_t *child, jl_module_t *parent) JL_NOTSAFEPOINT
 {
     while (1) {
         if (parent == child)

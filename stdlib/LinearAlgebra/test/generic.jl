@@ -31,7 +31,7 @@ Base.isfinite(q::Quaternion) = isfinite(q.s) & isfinite(q.v1) & isfinite(q.v2) &
 (/)(q::Quaternion, w::Quaternion) = q * conj(w) * (1.0 / abs2(w))
 (\)(q::Quaternion, w::Quaternion) = conj(q) * w * (1.0 / abs2(q))
 
-srand(123)
+Random.seed!(123)
 
 n = 5 # should be odd
 
@@ -80,6 +80,8 @@ n = 5 # should be odd
         @test logdet(A) ≈ log(det(A))
         @test logabsdet(A)[1] ≈ log(abs(det(A)))
         @test logabsdet(Matrix{elty}(-I, n, n))[2] == -1
+        infinity = convert(float(elty), Inf)
+        @test logabsdet(zeros(elty, n, n)) == (-infinity, zero(elty))
         if elty <: Real
             @test logabsdet(A)[2] == sign(det(A))
             @test_throws DomainError logdet(Matrix{elty}(-I, n, n))
@@ -87,68 +89,6 @@ n = 5 # should be odd
             @test logabsdet(A)[2] ≈ sign(det(A))
         end
     end
-end
-
-@testset "diff" begin
-    # test diff, throw ArgumentError for invalid dimension argument
-    X = [3  9   5;
-         7  4   2;
-         2  1  10]
-    @test diff(X,1) == [4  -5 -3; -5  -3  8]
-    @test diff(X,2) == [6 -4; -3 -2; -1 9]
-    @test diff(view(X, 1:2, 1:2),1) == [4 -5]
-    @test diff(view(X, 1:2, 1:2),2) == reshape([6; -3], (2,1))
-    @test diff(view(X, 2:3, 2:3),1) == [-3 8]
-    @test diff(view(X, 2:3, 2:3),2) == reshape([-2; 9], (2,1))
-    @test_throws ArgumentError diff(X,3)
-    @test_throws ArgumentError diff(X,-1)
-end
-
-@testset "linrange" begin
-    # make sure unequal input arrays throw an error
-    x = [2; 5; 6]
-    y = [3; 7; 10; 10]
-    @test_throws DimensionMismatch linreg(x, y)
-    x = [2 5 6]
-    y = [3; 7; 10]
-    @test_throws MethodError linreg(x, y)
-
-    # check (UnitRange, Array)
-    x = 1:12
-    y = [5.5; 6.3; 7.6; 8.8; 10.9; 11.79; 13.48; 15.02; 17.77; 20.81; 22.0; 22.99]
-    @test [linreg(x,y)...] ≈ [2.5559090909090867, 1.6960139860139862]
-    @test [linreg(view(x,1:6),view(y,1:6))...] ≈ [3.8366666666666642,1.3271428571428574]
-
-    # check (LinSpace, UnitRange)
-    x = linspace(1.0, 12.0, 100)
-    y = -100:-1
-    @test [linreg(x, y)...] ≈ [-109.0, 9.0]
-
-    # check (UnitRange, UnitRange)
-    x = 1:12
-    y = 12:-1:1
-    @test [linreg(x, y)...] ≈ [13.0, -1.0]
-
-    # check (LinSpace, LinSpace)
-    x = linspace(-5, 10, 100)
-    y = linspace(50, 200, 100)
-    @test [linreg(x, y)...] ≈ [100.0, 10.0]
-
-    # check (Array, Array)
-    # Anscombe's quartet (https://en.wikipedia.org/wiki/Anscombe%27s_quartet)
-    x123 = [10.0; 8.0; 13.0; 9.0; 11.0; 14.0; 6.0; 4.0; 12.0; 7.0; 5.0]
-    y1 = [8.04; 6.95; 7.58; 8.81; 8.33; 9.96; 7.24; 4.26; 10.84; 4.82; 5.68]
-    @test [linreg(x123,y1)...] ≈ [3.0,0.5] atol=15e-5
-
-    y2 = [9.14; 8.14; 8.74; 8.77; 9.26; 8.10; 6.12; 3.10; 9.13; 7.26; 4.74]
-    @test [linreg(x123,y2)...] ≈ [3.0,0.5] atol=10e-3
-
-    y3 = [7.46; 6.77; 12.74; 7.11; 7.81; 8.84; 6.08; 5.39; 8.15; 6.42; 5.73]
-    @test [linreg(x123,y3)...] ≈ [3.0,0.5] atol=10e-3
-
-    x4 = [8.0; 8.0; 8.0; 8.0; 8.0; 8.0; 8.0; 19.0; 8.0; 8.0; 8.0]
-    y4 = [6.58; 5.76; 7.71; 8.84; 8.47; 7.04; 5.25; 12.50; 5.56; 7.91; 6.89]
-    @test [linreg(x4,y4)...] ≈ [3.0,0.5] atol=10e-3
 end
 
 @testset "diag" begin
@@ -174,8 +114,10 @@ end
 @test !issymmetric(fill(1,5,3))
 @test !ishermitian(fill(1,5,3))
 @test (x = fill(1,3); cross(x,x) == zeros(3))
+@test_throws DimensionMismatch cross(fill(1,3), fill(1,4))
+@test_throws DimensionMismatch cross(fill(1,2), fill(1,3))
 
-@test trace(Bidiagonal(fill(1,5),fill(0,4),:U)) == 5
+@test tr(Bidiagonal(fill(1,5),fill(0,4),:U)) == 5
 
 
 @testset "array and subarray" begin
@@ -193,8 +135,8 @@ end
             @test lmul!(Diagonal([1; 2]), copy(a)) == a.*[1; 2]
             @test rmul!(copy(a), Diagonal(1.:an)) == a.*Vector(1:an)'
             @test rmul!(copy(a), Diagonal(1:an)) == a.*Vector(1:an)'
-            @test_throws DimensionMismatch lmul!(Diagonal(Vector{Float64}(uninitialized,am+1)), a)
-            @test_throws DimensionMismatch rmul!(a, Diagonal(Vector{Float64}(uninitialized,an+1)))
+            @test_throws DimensionMismatch lmul!(Diagonal(Vector{Float64}(undef,am+1)), a)
+            @test_throws DimensionMismatch rmul!(a, Diagonal(Vector{Float64}(undef,an+1)))
         end
 
         @testset "Scaling with 3-argument mul!" begin
@@ -202,9 +144,9 @@ end
             @test mul!(similar(a), a, 5.) == a*5
             @test mul!(similar(a), Diagonal([1.; 2.]), a) == a.*[1; 2]
             @test mul!(similar(a), Diagonal([1; 2]), a)   == a.*[1; 2]
-            @test_throws DimensionMismatch mul!(similar(a), Diagonal(Vector{Float64}(uninitialized, am+1)), a)
-            @test_throws DimensionMismatch mul!(Matrix{Float64}(uninitialized, 3, 2), a, Diagonal(Vector{Float64}(uninitialized, an+1)))
-            @test_throws DimensionMismatch mul!(similar(a), a, Diagonal(Vector{Float64}(uninitialized, an+1)))
+            @test_throws DimensionMismatch mul!(similar(a), Diagonal(Vector{Float64}(undef, am+1)), a)
+            @test_throws DimensionMismatch mul!(Matrix{Float64}(undef, 3, 2), a, Diagonal(Vector{Float64}(undef, an+1)))
+            @test_throws DimensionMismatch mul!(similar(a), a, Diagonal(Vector{Float64}(undef, an+1)))
             @test mul!(similar(a), a, Diagonal(1.:an)) == a.*Vector(1:an)'
             @test mul!(similar(a), a, Diagonal(1:an))  == a.*Vector(1:an)'
         end
@@ -235,7 +177,7 @@ end
 @testset "ops on Numbers" begin
     @testset for elty in [Float32,Float64,ComplexF32,ComplexF64]
         a = rand(elty)
-        @test trace(a)         == a
+        @test tr(a)            == a
         @test rank(zero(elty)) == 0
         @test rank(one(elty))  == 1
         @test !isfinite(cond(zero(elty)))
@@ -251,19 +193,20 @@ end
     @test !issymmetric(NaN)
 end
 
+@test rank(fill(0, 0, 0)) == 0
 @test rank([1.0 0.0; 0.0 0.9],0.95) == 1
-@test qr(big.([0 1; 0 0]))[2] == [0 1; 0 0]
+@test qr(big.([0 1; 0 0])).R == [0 1; 0 0]
 
 @test norm([2.4e-322, 4.4e-323]) ≈ 2.47e-322
 @test norm([2.4e-322, 4.4e-323], 3) ≈ 2.4e-322
-@test_throws ArgumentError norm(Matrix{Float64}(uninitialized,5,5),5)
+@test_throws ArgumentError opnorm(Matrix{Float64}(undef,5,5),5)
 
-@testset "generic vecnorm for arrays of arrays" begin
+@testset "generic norm for arrays of arrays" begin
     x = Vector{Int}[[1,2], [3,4]]
     @test @inferred(norm(x)) ≈ sqrt(30)
     @test norm(x, 0) == length(x)
-    @test norm(x, 1) ≈ sqrt(5) + 5
-    @test norm(x, 3) ≈ cbrt(sqrt(125)+125)
+    @test norm(x, 1) ≈ 5+sqrt(5)
+    @test norm(x, 3) ≈ cbrt(5^3  +sqrt(5)^3)
 end
 
 @testset "LinearAlgebra.axp(b)y! for element type without commutative multiplication" begin
@@ -350,6 +293,7 @@ Base.zero(::Type{ModInt{n}}) where {n} = ModInt{n}(0)
 Base.zero(::ModInt{n}) where {n} = ModInt{n}(0)
 Base.one(::Type{ModInt{n}}) where {n} = ModInt{n}(1)
 Base.one(::ModInt{n}) where {n} = ModInt{n}(1)
+Base.conj(a::ModInt{n}) where {n} = a
 Base.adjoint(a::ModInt{n}) where {n} = ModInt{n}(conj(a))
 Base.transpose(a::ModInt{n}) where {n} = a  # see Issue 20978
 LinearAlgebra.Adjoint(a::ModInt{n}) where {n} = adjoint(a)
@@ -359,13 +303,13 @@ LinearAlgebra.Transpose(a::ModInt{n}) where {n} = transpose(a)
     A = [ModInt{2}(1) ModInt{2}(0); ModInt{2}(1) ModInt{2}(1)]
     b = [ModInt{2}(1), ModInt{2}(0)]
 
-    @test A*(lufact(A, Val(false))\b) == b
+    @test A*(lu(A, Val(false))\b) == b
 
     # Needed for pivoting:
     Base.abs(a::ModInt{n}) where {n} = a
     Base.:<(a::ModInt{n}, b::ModInt{n}) where {n} = a.k < b.k
 
-    @test A*(lufact(A, Val(true))\b) == b
+    @test A*(lu(A, Val(true))\b) == b
 end
 
 @testset "fallback throws properly for AbstractArrays with dimension > 2" begin
@@ -425,6 +369,10 @@ end
         @test !isdiag(lbidiag)
         @test isdiag(adiag)
     end
+end
+
+@testset "missing values" begin
+    @test ismissing(norm(missing))
 end
 
 end # module TestGeneric

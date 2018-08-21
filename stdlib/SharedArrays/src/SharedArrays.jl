@@ -1,7 +1,5 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
-__precompile__(true)
-
 """
 Provide the [`SharedArray`](@ref) type. It represents an array, which is shared across multiple processes, on a single machine.
 """
@@ -15,9 +13,8 @@ import Random
 using Serialization
 using Serialization: serialize_cycle_header, serialize_type, writetag, UNDEFREF_TAG, serialize, deserialize
 import Serialization: serialize, deserialize
-import Distributed: RRID, procs
+import Distributed: RRID, procs, remotecall_fetch
 import Base.Filesystem: JL_O_CREAT, JL_O_RDWR, S_IRUSR, S_IWUSR
-using Printf: @sprintf
 
 export SharedArray, SharedVector, SharedMatrix, sdata, indexpids, localindices
 
@@ -44,7 +41,7 @@ mutable struct SharedArray{T,N} <: DenseArray{T,N}
     loc_subarr_1d::SubArray{T,1,Array{T,1},Tuple{UnitRange{Int}},true}
 
     function SharedArray{T,N}(d,p,r,sn,s) where {T,N}
-        S = new(RRID(),d,p,r,sn,s,0,view(Array{T}(uninitialized, ntuple(d->0,N)), 1:0))
+        S = new(RRID(),d,p,r,sn,s,0,view(Array{T}(undef, ntuple(d->0,N)), 1:0))
         sa_refs[S.id] = WeakRef(S)
         S
     end
@@ -105,17 +102,17 @@ beginning of the file.
 SharedArray
 
 function SharedArray{T,N}(dims::Dims{N}; init=false, pids=Int[]) where {T,N}
-    isbits(T) || throw(ArgumentError("type of SharedArray elements must be bits types, got $(T)"))
+    isbitstype(T) || throw(ArgumentError("type of SharedArray elements must be bits types, got $(T)"))
 
     pids, onlocalhost = shared_pids(pids)
 
     local shm_seg_name = ""
-    local s = Array{T}(uninitialized, ntuple(d->0,N))
+    local s = Array{T}(undef, ntuple(d->0,N))
     local S
     local shmmem_create_pid
     try
         # On OSX, the shm_seg_name length must be <= 31 characters (including the terminating NULL character)
-        shm_seg_name = @sprintf("/jl%06u%s", getpid() % 10^6, randstring(20))
+        shm_seg_name = "/jl$(lpad(string(getpid() % 10^6), 6, "0"))$(randstring(20))"
         if onlocalhost
             shmmem_create_pid = myid()
             s = shm_mmap_array(T, dims, shm_seg_name, JL_O_CREAT | JL_O_RDWR)
@@ -130,7 +127,7 @@ function SharedArray{T,N}(dims::Dims{N}; init=false, pids=Int[]) where {T,N}
 
         func_mapshmem = () -> shm_mmap_array(T, dims, shm_seg_name, JL_O_RDWR)
 
-        refs = Vector{Future}(uninitialized, length(pids))
+        refs = Vector{Future}(undef, length(pids))
         for (i, p) in enumerate(pids)
             refs[i] = remotecall(func_mapshmem, p)
         end
@@ -179,7 +176,7 @@ function SharedArray{T,N}(filename::AbstractString, dims::NTuple{N,Int}, offset:
     if !isabspath(filename)
         throw(ArgumentError("$filename is not an absolute path; try abspath(filename)?"))
     end
-    if !isbits(T)
+    if !isbitstype(T)
         throw(ArgumentError("type of SharedArray elements must be bits types, got $(T)"))
     end
 
@@ -207,11 +204,11 @@ function SharedArray{T,N}(filename::AbstractString, dims::NTuple{N,Int}, offset:
     end
 
     # Create the file if it doesn't exist, map it if it does
-    refs = Vector{Future}(uninitialized, length(pids))
+    refs = Vector{Future}(undef, length(pids))
     func_mmap = mode -> open(filename, mode) do io
         Mmap.mmap(io, Array{T,N}, dims, offset; shared=true)
     end
-    s = Array{T}(uninitialized, ntuple(d->0,N))
+    s = Array{T}(undef, ntuple(d->0,N))
     if onlocalhost
         s = func_mmap(mode)
         refs[1] = remotecall(pids[1]) do
@@ -272,7 +269,7 @@ function finalize_refs(S::SharedArray{T,N}) where T where N
         empty!(S.pids)
         empty!(S.refs)
         init_loc_flds(S)
-        S.s = Array{T}(uninitialized, ntuple(d->0,N))
+        S.s = Array{T}(undef, ntuple(d->0,N))
         delete!(sa_refs, S.id)
     end
     S
@@ -291,7 +288,7 @@ function reshape(a::SharedArray{T}, dims::NTuple{N,Int}) where {T,N}
     if length(a) != prod(dims)
         throw(DimensionMismatch("dimensions must be consistent with array size"))
     end
-    refs = Vector{Future}(uninitialized, length(a.pids))
+    refs = Vector{Future}(undef, length(a.pids))
     for (i, p) in enumerate(a.pids)
         refs[i] = remotecall(p, a.refs[i], dims) do r,d
             reshape(fetch(r),d)
@@ -359,6 +356,8 @@ function SharedArray{TS,N}(A::Array{TA,N}) where {TS,TA,N}
     copyto!(S, A)
 end
 
+convert(T::Type{<:SharedArray}, a::Array) = T(a)
+
 function deepcopy_internal(S::SharedArray, stackdict::IdDict)
     haskey(stackdict, S) && return stackdict[S]
     R = SharedArray{eltype(S),ndims(S)}(size(S); pids = S.pids)
@@ -408,7 +407,7 @@ sub_1dim(S::SharedArray, pidx) = view(S.s, range_1dim(S, pidx))
 
 function init_loc_flds(S::SharedArray{T,N}, empty_local=false) where T where N
     if myid() in S.pids
-        S.pidx = findfirst(equalto(myid()), S.pids)
+        S.pidx = findfirst(isequal(myid()), S.pids)
         if isa(S.refs[1], Future)
             refid = remoteref_id(S.refs[S.pidx])
         else
@@ -420,9 +419,9 @@ function init_loc_flds(S::SharedArray{T,N}, empty_local=false) where T where N
     else
         S.pidx = 0
         if empty_local
-            S.s = Array{T}(uninitialized, ntuple(d->0,N))
+            S.s = Array{T}(undef, ntuple(d->0,N))
         end
-        S.loc_subarr_1d = view(Array{T}(uninitialized, ntuple(d->0,N)), 1:0)
+        S.loc_subarr_1d = view(Array{T}(undef, ntuple(d->0,N)), 1:0)
     end
 end
 
@@ -489,7 +488,7 @@ function show(io::IO, mime::MIME"text/plain", S::SharedArray)
     else
         # retrieve from the first worker mapping the array.
         println(io, summary(S), ":")
-        showarray(io, remotecall_fetch(sharr->sharr.s, S.pids[1], S), false; header=false)
+        Base.print_array(io, remotecall_fetch(sharr->sharr.s, S.pids[1], S))
     end
 end
 
@@ -558,6 +557,8 @@ similar(S::SharedArray) = similar(S.s, eltype(S), size(S))
 reduce(f, S::SharedArray) =
     mapreduce(fetch, f, Any[ @spawnat p reduce(f, S.loc_subarr_1d) for p in procs(S) ])
 
+reduce(::typeof(vcat), S::SharedVector) = invoke(reduce, Tuple{Any,SharedArray}, vcat, S)
+reduce(::typeof(hcat), S::SharedVector) = invoke(reduce, Tuple{Any,SharedArray}, hcat, S)
 
 function map!(f, S::SharedArray, Q::SharedArray)
     if (S !== Q) && (procs(S) != procs(Q) || localindices(S) != localindices(Q))
@@ -631,7 +632,7 @@ function shm_mmap_array(T, dims, shm_seg_name, mode)
     local A = nothing
 
     if (prod(dims) == 0) || (sizeof(T) == 0)
-        return Array{T}(uninitialized, dims)
+        return Array{T}(undef, dims)
     end
 
     try
@@ -684,15 +685,5 @@ shm_open(shm_seg_name, oflags, permissions) = ccall(:shm_open, Cint,
     (Cstring, Cint, Base.Cmode_t), shm_seg_name, oflags, permissions)
 
 end # os-test
-
-# 0.7 deprecations
-
-@deprecate SharedArray(::Type{T}, dims::Dims{N}; kwargs...) where {T,N} SharedArray{T}(dims; kwargs...)
-@deprecate SharedArray(::Type{T}, dims::Int...; kwargs...) where {T}    SharedArray{T}(dims...; kwargs...)
-@deprecate(SharedArray(filename::AbstractString, ::Type{T}, dims::NTuple{N,Int}, offset; kwargs...) where {T,N},
-           SharedArray{T}(filename, dims, offset; kwargs...))
-@deprecate(SharedArray(filename::AbstractString, ::Type{T}, dims::NTuple, offset; kwargs...) where {T},
-           SharedArray{T}(filename, dims, offset; kwargs...))
-@deprecate localindexes localindices
 
 end # module

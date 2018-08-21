@@ -2,7 +2,7 @@
 
 ## rand!(::BitArray) && bitrand
 
-function rand!(rng::AbstractRNG, B::BitArray)
+function rand!(rng::AbstractRNG, B::BitArray, ::SamplerType{Bool})
     isempty(B) && return B
     Bc = B.chunks
     rand!(rng, Bc)
@@ -21,23 +21,23 @@ julia> rng = MersenneTwister(1234);
 
 julia> bitrand(rng, 10)
 10-element BitArray{1}:
+ false
+  true
   true
   true
   true
  false
   true
  false
- false
-  true
  false
   true
 ```
 """
-bitrand(r::AbstractRNG, dims::Dims)   = rand!(r, BitArray(uninitialized, dims))
-bitrand(r::AbstractRNG, dims::Integer...) = rand!(r, BitArray(uninitialized, convert(Dims, dims)))
+bitrand(r::AbstractRNG, dims::Dims)   = rand!(r, BitArray(undef, dims))
+bitrand(r::AbstractRNG, dims::Integer...) = rand!(r, BitArray(undef, convert(Dims, dims)))
 
-bitrand(dims::Dims)   = rand!(BitArray(uninitialized, dims))
-bitrand(dims::Integer...) = rand!(BitArray(uninitialized, convert(Dims, dims)))
+bitrand(dims::Dims)   = rand!(BitArray(undef, dims))
+bitrand(dims::Integer...) = rand!(BitArray(undef, convert(Dims, dims)))
 
 
 ## randstring (often useful for temporary filenames/dirnames)
@@ -52,11 +52,11 @@ number generator, see [Random Numbers](@ref).
 
 # Examples
 ```jldoctest
-julia> srand(0); randstring()
-"c03rgKi1"
+julia> Random.seed!(0); randstring()
+"0IPrGg0J"
 
 julia> randstring(MersenneTwister(0), 'a':'z', 6)
-"wijzek"
+"aszvqk"
 
 julia> randstring("ACGT")
 "TATCGGTC"
@@ -85,6 +85,7 @@ end
 # (Note that this is different from the problem of finding a random
 #  size-m subset of A where m is fixed!)
 function randsubseq!(r::AbstractRNG, S::AbstractArray, A::AbstractArray, p::Real)
+    @assert !has_offset_axes(S, A)
     0 <= p <= 1 || throw(ArgumentError("probability $p not in [0,1]"))
     n = length(A)
     p == 1 && return copyto!(resize!(S, n), A)
@@ -144,7 +145,7 @@ randsubseq(A::AbstractArray, p::Real) = randsubseq(GLOBAL_RNG, A, p)
 ## rand Less Than Masked 52 bits (helper function)
 
 "Return a sampler generating a random `Int` (masked with `mask`) in ``[0, n)``, when `n <= 2^52`."
-ltm52(n::Int, mask::Int=nextpow2(n)-1) = LessThan(n-1, Masked(mask, UInt52Raw(Int)))
+ltm52(n::Int, mask::Int=nextpow(2, n)-1) = LessThan(n-1, Masked(mask, UInt52Raw(Int)))
 
 ## shuffle & shuffle!
 
@@ -179,9 +180,11 @@ julia> shuffle!(rng, Vector(1:16))
 ```
 """
 function shuffle!(r::AbstractRNG, a::AbstractArray)
+    @assert !has_offset_axes(a)
     n = length(a)
+    n <= 1 && return a # nextpow below won't work with n == 0
     @assert n <= Int64(2)^52
-    mask = nextpow2(n) - 1
+    mask = nextpow(2, n) - 1
     for i = n:-1:2
         (mask >> 1) == i && (mask >>= 1)
         j = 1 + rand(r, ltm52(i, mask))
@@ -242,7 +245,7 @@ julia> randperm(MersenneTwister(1234), 4)
  3
 ```
 """
-randperm(r::AbstractRNG, n::Integer) = randperm!(r, Vector{Int}(uninitialized, n))
+randperm(r::AbstractRNG, n::Integer) = randperm!(r, Vector{Int}(undef, n))
 randperm(n::Integer) = randperm(GLOBAL_RNG, n)
 
 """
@@ -255,7 +258,7 @@ optional `rng` argument specifies a random number generator (see
 
 # Examples
 ```jldoctest
-julia> randperm!(MersenneTwister(1234), Vector{Int}(uninitialized, 4))
+julia> randperm!(MersenneTwister(1234), Vector{Int}(undef, 4))
 4-element Array{Int64,1}:
  2
  1
@@ -271,7 +274,7 @@ function randperm!(r::AbstractRNG, a::Array{<:Integer})
     mask = 3
     @inbounds for i = 2:n
         j = 1 + rand(r, ltm52(i, mask))
-        if i != j # a[i] is uninitialized (and could be #undef)
+        if i != j # a[i] is undef (and could be #undef)
             a[i] = a[j]
         end
         a[j] = i
@@ -303,7 +306,7 @@ julia> randcycle(MersenneTwister(1234), 6)
  2
 ```
 """
-randcycle(r::AbstractRNG, n::Integer) = randcycle!(r, Vector{Int}(uninitialized, n))
+randcycle(r::AbstractRNG, n::Integer) = randcycle!(r, Vector{Int}(undef, n))
 randcycle(n::Integer) = randcycle(GLOBAL_RNG, n)
 
 """
@@ -315,7 +318,7 @@ The optional `rng` argument specifies a random number generator, see
 
 # Examples
 ```jldoctest
-julia> randcycle!(MersenneTwister(1234), Vector{Int}(uninitialized, 6))
+julia> randcycle!(MersenneTwister(1234), Vector{Int}(undef, 6))
 6-element Array{Int64,1}:
  3
  5

@@ -58,6 +58,15 @@ Tridiagonal(A::AbstractTriangular) =
         throw(ArgumentError("matrix cannot be represented as Tridiagonal"))
 
 
+const ConvertibleSpecialMatrix = Union{Diagonal,Bidiagonal,SymTridiagonal,Tridiagonal,AbstractTriangular}
+
+convert(T::Type{<:Diagonal},       m::ConvertibleSpecialMatrix) = m isa T ? m : T(m)
+convert(T::Type{<:SymTridiagonal}, m::ConvertibleSpecialMatrix) = m isa T ? m : T(m)
+convert(T::Type{<:Tridiagonal},    m::ConvertibleSpecialMatrix) = m isa T ? m : T(m)
+
+convert(T::Type{<:LowerTriangular}, m::Union{LowerTriangular,UnitLowerTriangular}) = m isa T ? m : T(m)
+convert(T::Type{<:UpperTriangular}, m::Union{UpperTriangular,UnitUpperTriangular}) = m isa T ? m : T(m)
+
 # Constructs two method definitions taking into account (assumed) commutativity
 # e.g. @commutative f(x::S, y::T) where {S,T} = x+y is the same is defining
 #     f(x::S, y::T) where {S,T} = x+y
@@ -133,8 +142,7 @@ _small_enough(A::Bidiagonal) = size(A, 1) <= 1
 _small_enough(A::Tridiagonal) = size(A, 1) <= 2
 _small_enough(A::SymTridiagonal) = size(A, 1) <= 2
 
-# TODO: Add Diagonal to this method when 0.7 deprecations are removed
-function fill!(A::Union{Bidiagonal,Tridiagonal,SymTridiagonal}, x)
+function fill!(A::Union{Diagonal,Bidiagonal,Tridiagonal,SymTridiagonal}, x)
     xT = convert(eltype(A), x)
     (iszero(xT) || _small_enough(A)) && return fillstored!(A, xT)
     throw(ArgumentError("array of type $(typeof(A)) and size $(size(A)) can

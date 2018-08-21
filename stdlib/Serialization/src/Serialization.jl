@@ -8,8 +8,9 @@ Provide serialization of Julia objects via the functions
 module Serialization
 
 import Base: GMP, Bottom, unsafe_convert, uncompressed_ast
-import Core: svec
-using Base: ViewIndex, Slice, index_lengths, unwrap_unionall
+import Core: svec, SimpleVector
+using Base: unaliascopy, unwrap_unionall, has_offset_axes
+using Core.IR
 
 export serialize, deserialize, AbstractSerializer, Serializer
 
@@ -18,15 +19,13 @@ abstract type AbstractSerializer end
 mutable struct Serializer{I<:IO} <: AbstractSerializer
     io::I
     counter::Int
-    table::IdDict
+    table::IdDict{Any,Any}
     pending_refs::Vector{Int}
     known_object_data::Dict{UInt64,Any}
     Serializer{I}(io::I) where I<:IO = new(io, 0, IdDict(), Int[], Dict{UInt64,Any}())
 end
 
 Serializer(io::IO) = Serializer{typeof(io)}(io)
-
-@deprecate SerializationState Serializer
 
 ## serializing values ##
 
@@ -36,8 +35,8 @@ const n_reserved_tags = 12
 
 const TAGS = Any[
     Symbol, Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64, Int128, UInt128,
-    Float16, Float32, Float64, Char, DataType, Union, UnionAll, TypeName, Tuple,
-    Array, Expr, LineNumberNode, LabelNode, GotoNode, QuoteNode, CodeInfo, TypeVar,
+    Float16, Float32, Float64, Char, DataType, Union, UnionAll, Core.TypeName, Tuple,
+    Array, Expr, LineNumberNode, :__LabelNode__, GotoNode, QuoteNode, CodeInfo, TypeVar,
     Core.Box, Core.MethodInstance, Module, Task, String, SimpleVector, Method,
     GlobalRef, SlotNumber, TypedSlot, NewvarNode, SSAValue,
 
@@ -64,7 +63,7 @@ const TAGS = Any[
     :(=), :(==), :(===), :gotoifnot, :A, :B, :C, :M, :N, :T, :S, :X, :Y, :a, :b, :c, :d, :e, :f,
     :g, :h, :i, :j, :k, :l, :m, :n, :o, :p, :q, :r, :s, :t, :u, :v, :w, :x, :y, :z, :add_int,
     :sub_int, :mul_int, :add_float, :sub_float, :new, :mul_float, :bitcast, :start, :done, :next,
-    :indexed_next, :getfield, :meta, :eq_int, :slt_int, :sle_int, :ne_int, :push_loc, :pop_loc,
+    :indexed_iterate, :getfield, :meta, :eq_int, :slt_int, :sle_int, :ne_int, :push_loc, :pop_loc,
     :pop, :arrayset, :arrayref, :apply_type, :inbounds, :getindex, :setindex!, :Core, :!, :+,
     :Base, :static_parameter, :convert, :colon, Symbol("#self#"), Symbol("#temp#"), :tuple,
 
@@ -110,7 +109,7 @@ const METHODINSTANCE_TAG = sertag(Core.MethodInstance)
 const METHOD_TAG = sertag(Method)
 const TASK_TAG = sertag(Task)
 const DATATYPE_TAG = sertag(DataType)
-const TYPENAME_TAG = sertag(TypeName)
+const TYPENAME_TAG = sertag(Core.TypeName)
 const INT32_TAG = sertag(Int32)
 const INT64_TAG = sertag(Int64)
 const GLOBALREF_TAG = sertag(GlobalRef)
@@ -134,15 +133,16 @@ const REF_OBJECT_TAG       = Int32(o0+13)
 const FULL_GLOBALREF_TAG   = Int32(o0+14)
 const HEADER_TAG           = Int32(o0+15)
 
-writetag(s::IO, tag) = write(s, UInt8(tag))
+writetag(s::IO, tag) = (write(s, UInt8(tag)); nothing)
 
 function write_as_tag(s::IO, tag)
     tag < VALUE_TAGS && write(s, UInt8(0))
     write(s, UInt8(tag))
+    nothing
 end
 
 # cycle handling
-function serialize_cycle(s::AbstractSerializer, x)
+function serialize_cycle(s::AbstractSerializer, @nospecialize(x))
     offs = get(s.table, x, -1)::Int
     if offs != -1
         if offs <= typemax(UInt16)
@@ -222,9 +222,11 @@ function serialize(s::AbstractSerializer, x::Symbol)
         write(s.io, Int32(len))
     end
     unsafe_write(s.io, pname, len)
+    nothing
 end
 
 function serialize_array_data(s::IO, a)
+    @assert !has_offset_axes(a)
     isempty(a) && return 0
     if eltype(a) === Bool
         last = a[1]
@@ -256,7 +258,7 @@ function serialize(s::AbstractSerializer, a::Array)
     else
         serialize(s, length(a))
     end
-    if isbits(elty)
+    if isbitstype(elty)
         serialize_array_data(s.io, a)
     else
         sizehint!(s.table, div(length(a),4))  # prepare for lots of pointers
@@ -271,28 +273,11 @@ function serialize(s::AbstractSerializer, a::Array)
 end
 
 function serialize(s::AbstractSerializer, a::SubArray{T,N,A}) where {T,N,A<:Array}
-    b = trimmedsubarray(a)
+    # SubArray's copy only selects the relevant data (and reduces the size) but does not
+    # preserve the type of the argument. This internal function does both:
+    b = unaliascopy(a)
     serialize_any(s, b)
 end
-
-function trimmedsubarray(V::SubArray{T,N,A}) where {T,N,A<:Array}
-    dest = Array{eltype(V)}(uninitialized, trimmedsize(V))
-    copyto!(dest, V)
-    _trimmedsubarray(dest, V, (), V.indices...)
-end
-
-trimmedsize(V) = index_lengths(V.indices...)
-
-function _trimmedsubarray(A, V::SubArray{T,N,P,I,LD}, newindices) where {T,N,P,I,LD}
-    LD && return SubArray{T,N,P,I,LD}(A, newindices, Base.compute_offset1(A, 1, newindices), 1)
-    SubArray{T,N,P,I,LD}(A, newindices, 0, 0)
-end
-_trimmedsubarray(A, V, newindices, index::ViewIndex, indices...) = _trimmedsubarray(A, V, (newindices..., trimmedindex(V.parent, length(newindices)+1, index)), indices...)
-
-trimmedindex(P, d, i::Real) = oftype(i, 1)
-trimmedindex(P, d, i::Colon) = i
-trimmedindex(P, d, i::Slice) = i
-trimmedindex(P, d, i::AbstractArray) = oftype(i, reshape(linearindices(i), axes(i)))
 
 function serialize(s::AbstractSerializer, ss::String)
     len = sizeof(ss)
@@ -304,6 +289,7 @@ function serialize(s::AbstractSerializer, ss::String)
         write(s.io, Int64(len))
     end
     write(s.io, ss)
+    nothing
 end
 
 function serialize(s::AbstractSerializer, ss::SubString{String})
@@ -321,12 +307,7 @@ end
 
 function serialize(s::AbstractSerializer, n::BigInt)
     serialize_type(s, BigInt)
-    serialize(s, base(62,n))
-end
-
-function serialize(s::AbstractSerializer, n::BigFloat)
-    serialize_type(s, BigFloat)
-    serialize(s, string(n))
+    serialize(s, string(n, base = 62))
 end
 
 function serialize(s::AbstractSerializer, ex::Expr)
@@ -340,7 +321,6 @@ function serialize(s::AbstractSerializer, ex::Expr)
         write(s.io, Int32(l))
     end
     serialize(s, ex.head)
-    serialize(s, ex.typ)
     for a in ex.args
         serialize(s, a)
     end
@@ -478,14 +458,14 @@ function serialize(s::AbstractSerializer, g::GlobalRef)
     serialize(s, g.name)
 end
 
-function serialize(s::AbstractSerializer, t::TypeName)
+function serialize(s::AbstractSerializer, t::Core.TypeName)
     serialize_cycle(s, t) && return
     writetag(s.io, TYPENAME_TAG)
     write(s.io, object_number(s, t))
     serialize_typename(s, t)
 end
 
-function serialize_typename(s::AbstractSerializer, t::TypeName)
+function serialize_typename(s::AbstractSerializer, t::Core.TypeName)
     serialize(s, t.name)
     serialize(s, t.names)
     primary = unwrap_unionall(t.wrapper)
@@ -560,6 +540,7 @@ function serialize_type_data(s, t::DataType)
             end
         end
     end
+    nothing
 end
 
 function serialize(s::AbstractSerializer, t::DataType)
@@ -589,6 +570,7 @@ function serialize(s::AbstractSerializer, n::Int32)
         writetag(s.io, INT32_TAG)
         write(s.io, n)
     end
+    nothing
 end
 
 function serialize(s::AbstractSerializer, n::Int64)
@@ -601,6 +583,7 @@ function serialize(s::AbstractSerializer, n::Int64)
         writetag(s.io, INT64_TAG)
         write(s.io, n)
     end
+    nothing
 end
 
 serialize(s::AbstractSerializer, ::Type{Bottom}) = write_as_tag(s.io, BOTTOM_TAG)
@@ -650,6 +633,7 @@ function serialize_any(s::AbstractSerializer, @nospecialize(x))
             end
         end
     end
+    nothing
 end
 
 """
@@ -760,7 +744,7 @@ function handle_deserialize(s::AbstractSerializer, b::Int32)
     elseif b == FULL_DATATYPE_TAG
         return deserialize_datatype(s, true)
     elseif b == WRAPPER_DATATYPE_TAG
-        tname = deserialize(s)::TypeName
+        tname = deserialize(s)::Core.TypeName
         return unwrap_unionall(tname.wrapper)
     elseif b == OBJECT_TAG
         t = deserialize(s)
@@ -869,7 +853,7 @@ function deserialize(s::AbstractSerializer, ::Type{Method})
     name = deserialize(s)::Symbol
     file = deserialize(s)::Symbol
     line = deserialize(s)::Int32
-    sig = deserialize(s)::DataType
+    sig = deserialize(s)::Type
     sparam_syms = deserialize(s)::SimpleVector
     ambig = deserialize(s)::Union{Array{Any,1}, Nothing}
     nargs = deserialize(s)::Int32
@@ -932,8 +916,8 @@ function deserialize_array(s::AbstractSerializer)
         elty = UInt8
     end
     if isa(d1, Integer)
-        if elty !== Bool && isbits(elty)
-            a = Vector{elty}(uninitialized, d1)
+        if elty !== Bool && isbitstype(elty)
+            a = Vector{elty}(undef, d1)
             s.table[slot] = a
             return read!(s.io, a)
         end
@@ -941,10 +925,10 @@ function deserialize_array(s::AbstractSerializer)
     else
         dims = convert(Dims, d1)::Dims
     end
-    if isbits(elty)
+    if isbitstype(elty)
         n = prod(dims)::Int
         if elty === Bool && n > 0
-            A = Array{Bool, length(dims)}(uninitialized, dims)
+            A = Array{Bool, length(dims)}(undef, dims)
             i = 1
             while i <= n
                 b = read(s.io, UInt8)::UInt8
@@ -957,12 +941,12 @@ function deserialize_array(s::AbstractSerializer)
                 end
             end
         else
-            A = read!(s.io, Array{elty}(uninitialized, dims))
+            A = read!(s.io, Array{elty}(undef, dims))
         end
         s.table[slot] = A
         return A
     end
-    A = Array{elty, length(dims)}(uninitialized, dims)
+    A = Array{elty, length(dims)}(undef, dims)
     s.table[slot] = A
     sizehint!(s.table, s.counter + div(length(A),4))
     for i = eachindex(A)
@@ -978,15 +962,13 @@ function deserialize_expr(s::AbstractSerializer, len)
     e = Expr(:temp)
     resolve_ref_immediately(s, e)
     e.head = deserialize(s)::Symbol
-    ty = deserialize(s)
     e.args = Any[ deserialize(s) for i = 1:len ]
-    e.typ = ty
     e
 end
 
 module __deserialized_types__ end
 
-function deserialize(s::AbstractSerializer, ::Type{TypeName})
+function deserialize(s::AbstractSerializer, ::Type{Core.TypeName})
     number = read(s.io, UInt64)
     return deserialize_typename(s, number)
 end
@@ -999,7 +981,7 @@ function deserialize_typename(s::AbstractSerializer, number)
     else
         # reuse the same name for the type, if possible, for nicer debugging
         tn_name = isdefined(__deserialized_types__, name) ? gensym() : name
-        tn = ccall(:jl_new_typename_in, Ref{TypeName}, (Any, Any),
+        tn = ccall(:jl_new_typename_in, Ref{Core.TypeName}, (Any, Any),
                    tn_name, __deserialized_types__)
         makenew = true
     end
@@ -1055,13 +1037,13 @@ function deserialize_typename(s::AbstractSerializer, number)
             end
         end
     end
-    return tn::TypeName
+    return tn::Core.TypeName
 end
 
 function deserialize_datatype(s::AbstractSerializer, full::Bool)
     slot = s.counter; s.counter += 1
     if full
-        tname = deserialize(s)::TypeName
+        tname = deserialize(s)::Core.TypeName
         ty = tname.wrapper
     else
         name = deserialize(s)::Symbol
@@ -1149,7 +1131,7 @@ function deserialize(s::AbstractSerializer, t::DataType)
     end
     if nf == 0
         return ccall(:jl_new_struct, Any, (Any,Any...), t)
-    elseif isbits(t)
+    elseif isbitstype(t)
         if nf == 1
             f1 = deserialize(s)
             return ccall(:jl_new_struct, Any, (Any,Any...), t, f1)
@@ -1191,15 +1173,13 @@ function deserialize(s::AbstractSerializer, T::Type{Dict{K,V}}) where {K,V}
     return t
 end
 
-deserialize(s::AbstractSerializer, ::Type{BigFloat}) = parse(BigFloat, deserialize(s))
-
 deserialize(s::AbstractSerializer, ::Type{BigInt}) = parse(BigInt, deserialize(s), base = 62)
 
 function deserialize(s::AbstractSerializer, t::Type{Regex})
     pattern = deserialize(s)
     compile_options = deserialize(s)
     match_options = deserialize(s)
-    Regex(pattern, compile_options, match_options)
+    return Regex(pattern, compile_options, match_options)
 end
 
 ## StackTraces
@@ -1215,6 +1195,7 @@ function serialize(s::AbstractSerializer, frame::Base.StackTraces.StackFrame)
     write(s.io, frame.from_c)
     write(s.io, frame.inlined)
     write(s.io, frame.pointer)
+    nothing
 end
 
 function deserialize(s::AbstractSerializer, ::Type{Base.StackTraces.StackFrame})

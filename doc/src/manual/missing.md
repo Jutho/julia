@@ -276,10 +276,6 @@ julia> y = Union{Missing, String}[missing, "b"]
 
 julia> convert(Array{String}, y)
 ERROR: MethodError: Cannot `convert` an object of type Missing to an object of type String
-This may have arisen from a call to the constructor String(...),
-since type constructors fall back to convert methods.
-Stacktrace:
-[...
 ```
 ## Skipping Missing Values
 
@@ -298,7 +294,7 @@ julia> sum(skipmissing([1, missing]))
 
 This convenience function returns an iterator which filters out `missing` values
 efficiently. It can therefore be used with any function which supports iterators
-```jldoctest
+```jldoctest; setup = :(using Statistics)
 julia> maximum(skipmissing([3, missing, 2, 1]))
 3
 

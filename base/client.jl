@@ -3,69 +3,6 @@
 ## client.jl - frontend handling command line options, environment setup,
 ##             and REPL
 
-const text_colors = AnyDict(
-    :black         => "\033[30m",
-    :red           => "\033[31m",
-    :green         => "\033[32m",
-    :yellow        => "\033[33m",
-    :blue          => "\033[34m",
-    :magenta       => "\033[35m",
-    :cyan          => "\033[36m",
-    :white         => "\033[37m",
-    :light_black   => "\033[90m", # gray
-    :light_red     => "\033[91m",
-    :light_green   => "\033[92m",
-    :light_yellow  => "\033[93m",
-    :light_blue    => "\033[94m",
-    :light_magenta => "\033[95m",
-    :light_cyan    => "\033[96m",
-    :normal        => "\033[0m",
-    :default       => "\033[39m",
-    :bold          => "\033[1m",
-    :underline     => "\033[4m",
-    :blink         => "\033[5m",
-    :reverse       => "\033[7m",
-    :hidden        => "\033[8m",
-    :nothing       => "",
-)
-
-for i in 0:255
-    text_colors[i] = "\033[38;5;$(i)m"
-end
-
-const disable_text_style = AnyDict(
-    :bold      => "\033[22m",
-    :underline => "\033[24m",
-    :blink     => "\033[25m",
-    :reverse   => "\033[27m",
-    :hidden    => "\033[28m",
-    :normal    => "",
-    :default   => "",
-    :nothing   => "",
-)
-
-# Create a docstring with an automatically generated list
-# of colors.
-available_text_colors = collect(Iterators.filter(x -> !isa(x, Integer), keys(text_colors)))
-const possible_formatting_symbols = [:normal, :bold, :default]
-available_text_colors = cat(1,
-    sort!(intersect(available_text_colors, possible_formatting_symbols), rev=true),
-    sort!(setdiff(  available_text_colors, possible_formatting_symbols)))
-
-const available_text_colors_docstring =
-    string(join([string("`:", key,"`")
-                 for key in available_text_colors], ",\n", ", or \n"))
-
-"""Dictionary of color codes for the terminal.
-
-Available colors are: $available_text_colors_docstring as well as the integers 0 to 255 inclusive.
-
-The color `:default` will print text in the default color while the color `:normal`
-will print text with all text properties (like boldness) reset.
-Printing with the color `:nothing` will print the string without modifications.
-"""
-text_colors
-
 have_color = false
 default_color_warn = :yellow
 default_color_error = :light_red
@@ -78,7 +15,7 @@ color_normal = text_colors[:normal]
 function repl_color(key, default)
     env_str = get(ENV, key, "")
     c = tryparse(Int, env_str)
-    c_conv = coalesce(c, Symbol(env_str))
+    c_conv = something(c, Symbol(env_str))
     haskey(text_colors, c_conv) ? c_conv : default
 end
 
@@ -96,6 +33,9 @@ stackframe_function_color() = repl_color("JULIA_STACKFRAME_FUNCTION_COLOR", :bol
 function repl_cmd(cmd, out)
     shell = shell_split(get(ENV, "JULIA_SHELL", get(ENV, "SHELL", "/bin/sh")))
     shell_name = Base.basename(shell[1])
+
+    # Immediately expand all arguments, so that typing e.g. ~/bin/foo works.
+    cmd.exec .= expanduser.(cmd.exec)
 
     if isempty(cmd.exec)
         throw(ArgumentError("no cmd to execute"))
@@ -116,7 +56,7 @@ function repl_cmd(cmd, out)
                     # If it's intended to simulate `cd`, it should instead be doing
                     # more nearly `cd $dir && printf %s \$PWD` (with appropriate quoting),
                     # since shell `cd` does more than just `echo` the result.
-                    dir = read(`$shell -c "printf %s $(shell_escape_posixly(dir))"`, String)
+                    dir = read(`$shell -c "printf '%s' $(shell_escape_posixly(dir))"`, String)
                 end
                 cd(dir)
             end
@@ -150,12 +90,6 @@ function ip_matches_func(ip, func::Symbol)
 end
 
 function display_error(io::IO, er, bt)
-    if !isempty(bt)
-        st = stacktrace(bt)
-        if !isempty(st)
-            io = redirect(io, log_error_to, st[1])
-        end
-    end
     printstyled(io, "ERROR: "; bold=true, color=Base.error_color())
     # remove REPL-related frames from interactive printing
     eval_ind = findlast(addr->ip_matches_func(addr, :eval), bt)
@@ -165,7 +99,7 @@ function display_error(io::IO, er, bt)
     showerror(IOContext(io, :limit => true), er, bt)
     println(io)
 end
-display_error(er, bt) = display_error(STDERR, er, bt)
+display_error(er, bt) = display_error(stderr, er, bt)
 display_error(er) = display_error(er, [])
 
 function eval_user_input(@nospecialize(ast), show_value::Bool)
@@ -180,8 +114,8 @@ function eval_user_input(@nospecialize(ast), show_value::Bool)
                 errcount, lasterr = 0, ()
             else
                 ast = Meta.lower(Main, ast)
-                value = eval(Main, ast)
-                eval(Main, Expr(:body, Expr(:(=), :ans, QuoteNode(value)), Expr(:return, nothing)))
+                value = Core.eval(Main, ast)
+                ccall(:jl_set_global, Cvoid, (Any, Any, Any), Main, :ans, value)
                 if !(value === nothing) && show_value
                     if have_color
                         print(answer_color())
@@ -189,7 +123,7 @@ function eval_user_input(@nospecialize(ast), show_value::Bool)
                     try
                         invokelatest(display, value)
                     catch err
-                        println(STDERR, "Evaluation succeeded, but an error occurred while showing value of type ", typeof(value), ":")
+                        println(stderr, "Evaluation succeeded, but an error occurred while showing value of type ", typeof(value), ":")
                         rethrow(err)
                     end
                     println()
@@ -198,29 +132,30 @@ function eval_user_input(@nospecialize(ast), show_value::Bool)
             break
         catch err
             if errcount > 0
-                println(STDERR, "SYSTEM: show(lasterr) caused an error")
+                println(stderr, "SYSTEM: show(lasterr) caused an error")
             end
             errcount, lasterr = errcount+1, err
             if errcount > 2
-                println(STDERR, "WARNING: it is likely that something important is broken, and Julia will not be able to continue normally")
+                println(stderr, "WARNING: it is likely that something important is broken, and Julia will not be able to continue normally")
                 break
             end
             bt = catch_backtrace()
         end
     end
-    isa(STDIN, TTY) && println()
+    isa(stdin, TTY) && println()
     nothing
 end
 
 function parse_input_line(s::String; filename::String="none", depwarn=true)
     # For now, assume all parser warnings are depwarns
-    ex = with_logger(depwarn ? current_logger() : NullLogger()) do
+    ex = if depwarn
         ccall(:jl_parse_input_line, Any, (Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t),
               s, sizeof(s), filename, sizeof(filename))
-    end
-    if ex isa Symbol && all(equalto('_'), string(ex))
-        # remove with 0.7 deprecation
-        Meta.lower(Main, ex)  # to get possible warning about using _ as an rvalue
+    else
+        with_logger(NullLogger()) do
+            ccall(:jl_parse_input_line, Any, (Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t),
+                  s, sizeof(s), filename, sizeof(filename))
+        end
     end
     return ex
 end
@@ -244,11 +179,11 @@ incomplete_tag(ex) = :none
 function incomplete_tag(ex::Expr)
     Meta.isexpr(ex, :incomplete) || return :none
     msg = ex.args[1]
-    contains(msg, "string") && return :string
-    contains(msg, "comment") && return :comment
-    contains(msg, "requires end") && return :block
-    contains(msg, "\"`\"") && return :cmd
-    contains(msg, "character") && return :char
+    occursin("string", msg) && return :string
+    occursin("comment", msg) && return :comment
+    occursin("requires end", msg) && return :block
+    occursin("\"`\"", msg) && return :cmd
+    occursin("character", msg) && return :char
     return :other
 end
 
@@ -291,24 +226,19 @@ function exec_options(opts)
     # Load Distributed module only if any of the Distributed options have been specified.
     distributed_mode = (opts.worker == 1) || (opts.nprocs > 0) || (opts.machine_file != C_NULL)
     if distributed_mode
-        eval(Main, :(using Distributed))
+        Core.eval(Main, :(using Distributed))
         invokelatest(Main.Distributed.process_opts, opts)
     end
 
-    # load ~/.juliarc file
-    startup && load_juliarc()
-
-    if repl || is_interactive
-        # load interactive-only libraries
-        eval(Main, :(using InteractiveUtils))
-    end
+    # load ~/.julia/config/startup.jl file
+    startup && load_julia_startup()
 
     # process cmds list
     for (cmd, arg) in cmds
         if cmd == 'e'
-            eval(Main, parse_input_line(arg))
+            Core.eval(Main, parse_input_line(arg))
         elseif cmd == 'E'
-            invokelatest(show, eval(Main, parse_input_line(arg)))
+            invokelatest(show, Core.eval(Main, parse_input_line(arg)))
             println()
         elseif cmd == 'L'
             # load file immediately on all processors
@@ -333,7 +263,7 @@ function exec_options(opts)
     end
     repl |= is_interactive
     if repl
-        interactiveinput = isa(STDIN, TTY)
+        interactiveinput = isa(stdin, TTY)
         if interactiveinput
             global is_interactive = true
             banner = (opts.banner != 0) # --banner!=no
@@ -345,16 +275,18 @@ function exec_options(opts)
     nothing
 end
 
-function load_juliarc()
-    # If the user built us with a specific Base.SYSCONFDIR, check that location first for a juliarc.jl file
+function load_julia_startup()
+    # If the user built us with a specific Base.SYSCONFDIR, check that location first for a startup.jl file
     #   If it is not found, then continue on to the relative path based on Sys.BINDIR
-    if !isempty(Base.SYSCONFDIR) && isfile(joinpath(Sys.BINDIR, Base.SYSCONFDIR, "julia", "juliarc.jl"))
-        include(Main, abspath(Sys.BINDIR, Base.SYSCONFDIR, "julia", "juliarc.jl"))
+    BINDIR = Sys.BINDIR::String
+    SYSCONFDIR = Base.SYSCONFDIR::String
+    if !isempty(SYSCONFDIR) && isfile(joinpath(BINDIR, SYSCONFDIR, "julia", "startup.jl"))
+        include(Main, abspath(BINDIR, SYSCONFDIR, "julia", "startup.jl"))
     else
-        include_ifexists(Main, abspath(Sys.BINDIR, "..", "etc", "julia", "juliarc.jl"))
+        include_ifexists(Main, abspath(BINDIR, "..", "etc", "julia", "startup.jl"))
     end
-    include_ifexists(Main, abspath(homedir(), ".juliarc.jl"))
-    nothing
+    include_ifexists(Main, abspath(homedir(), ".julia", "config", "startup.jl"))
+    return nothing
 end
 
 const repl_hooks = []
@@ -364,8 +296,8 @@ const repl_hooks = []
 
 Register a one-argument function to be called before the REPL interface is initialized in
 interactive sessions; this is useful to customize the interface. The argument of `f` is the
-REPL object. This function should be called from within the `.juliarc.jl` initialization
-file.
+REPL object. This function should be called from within the `.julia/config/startup.jl`
+initialization file.
 """
 atreplinit(f::Function) = (pushfirst!(repl_hooks, f); nothing)
 
@@ -374,8 +306,8 @@ function __atreplinit(repl)
         try
             f(repl)
         catch err
-            showerror(STDERR, err)
-            println(STDERR)
+            showerror(stderr, err)
+            println(stderr)
         end
     end
 end
@@ -386,12 +318,25 @@ const REPL_MODULE_REF = Ref{Module}()
 
 # run the requested sort of evaluation loop on stdio
 function run_main_repl(interactive::Bool, quiet::Bool, banner::Bool, history_file::Bool, color_set::Bool)
+    global active_repl
+    # load interactive-only libraries
+    if !isdefined(Main, :InteractiveUtils)
+        try
+            let InteractiveUtils = require(PkgId(UUID(0xb77e0a4c_d291_57a0_90e8_8db25a27a240), "InteractiveUtils"))
+                Core.eval(Main, :(const InteractiveUtils = $InteractiveUtils))
+                Core.eval(Main, :(using .InteractiveUtils))
+            end
+        catch ex
+            @warn "Failed to import InteractiveUtils into module Main" exception=(ex, catch_backtrace())
+        end
+    end
+
     if interactive && isassigned(REPL_MODULE_REF)
         invokelatest(REPL_MODULE_REF[]) do REPL
             term_env = get(ENV, "TERM", @static Sys.iswindows() ? "" : "dumb")
-            term = REPL.Terminals.TTYTerminal(term_env, STDIN, STDOUT, STDERR)
+            term = REPL.Terminals.TTYTerminal(term_env, stdin, stdout, stderr)
             color_set || (global have_color = REPL.Terminals.hascolor(term))
-            banner && REPL.banner(term, term)
+            banner && Base.banner(term)
             if term.term_type == "dumb"
                 active_repl = REPL.BasicREPL(term)
                 quiet || @warn "Terminal not fully functional"
@@ -399,7 +344,7 @@ function run_main_repl(interactive::Bool, quiet::Bool, banner::Bool, history_fil
                 active_repl = REPL.LineEditREPL(term, have_color, true)
                 active_repl.history_file = history_file
             end
-            # Make sure any displays pushed in .juliarc.jl ends up above the
+            # Make sure any displays pushed in .julia/config/startup.jl ends up above the
             # REPLDisplay
             pushdisplay(REPL.REPLDisplay(active_repl))
             _atreplinit(active_repl)
@@ -411,7 +356,7 @@ function run_main_repl(interactive::Bool, quiet::Bool, banner::Bool, history_fil
             @warn "REPL provider not available: using basic fallback"
         end
         banner && Base.banner()
-        let input = STDIN
+        let input = stdin
             if isa(input, File) || isa(input, IOStream)
                 # for files, we can slurp in the whole thing at once
                 ex = parse_input_line(read(input, String))
@@ -429,7 +374,7 @@ function run_main_repl(interactive::Bool, quiet::Bool, banner::Bool, history_fil
                 while isopen(input) || !eof(input)
                     if interactive
                         print("julia> ")
-                        flush(STDOUT)
+                        flush(stdout)
                     end
                     eval_user_input(parse_input_line(input), true)
                 end
@@ -439,10 +384,39 @@ function run_main_repl(interactive::Bool, quiet::Bool, banner::Bool, history_fil
     nothing
 end
 
+baremodule MainInclude
+include(fname::AbstractString) = Main.Base.include(Main, fname)
+eval(x) = Core.eval(Main, x)
+end
+
+"""
+    eval(expr)
+
+Evaluate an expression in the global scope of the containing module.
+Every `Module` (except those defined with `baremodule`) has its own 1-argument
+definition of `eval`, which evaluates expressions in that module.
+"""
+MainInclude.eval
+
+"""
+    include(path::AbstractString)
+
+Evaluate the contents of the input source file in the global scope of the containing module.
+Every module (except those defined with `baremodule`) has its own 1-argument
+definition of `include`, which evaluates the file in that module.
+Returns the result of the last evaluated expression of the input file. During including,
+a task-local include path is set to the directory containing the file. Nested calls to
+`include` will search relative to that path. This function is typically used to load source
+interactively, or to combine files in packages that are broken into multiple source files.
+
+Use [`Base.include`](@ref) to evaluate a file into another module.
+"""
+MainInclude.include
+
 function _start()
     empty!(ARGS)
     append!(ARGS, Core.ARGS)
-    @eval Main using Base.MainInclude
+    @eval Main import Base.MainInclude: eval, include
     try
         exec_options(JLOptions())
     catch err

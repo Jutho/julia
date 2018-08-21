@@ -69,6 +69,11 @@ end
     @test !isless(missing, missing)
     @test !isless(missing, 1)
     @test isless(1, missing)
+    @test (missing ≈ missing) === missing
+    @test isapprox(missing, 1.0, atol=1e-6) === missing
+    @test isapprox(1.0, missing, rtol=1e-6) === missing
+
+    @test !any(T -> T === Union{Missing,Bool}, Base.return_types(isequal, Tuple{Any,Any}))
 end
 
 @testset "arithmetic operators" begin
@@ -142,15 +147,15 @@ Base.zero(::Type{Unit}) = Unit(0)
 Base.one(::Type{Unit}) = 1
 
 @testset "elementary functions" begin
-    elementary_functions = [abs, abs2, sign,
+    elementary_functions = [abs, abs2, sign, real, imag,
                             acos, acosh, asin, asinh, atan, atanh, sin, sinh,
                             conj, cos, cosh, tan, tanh,
                             exp, exp2, expm1, log, log10, log1p, log2,
-                            exponent, sqrt, gamma, lgamma,
+                            exponent, sqrt,
                             identity, zero, one, oneunit,
                             iseven, isodd, ispow2,
                             isfinite, isinf, isnan, iszero,
-                            isinteger, isreal, isempty, transpose, float]
+                            isinteger, isreal, transpose, adjoint, float]
 
     # All elementary functions return missing when evaluating missing
     for f in elementary_functions
@@ -190,13 +195,14 @@ end
         @test ismissing(f(missing, 1))
         @test ismissing(f(missing, 1, 1))
         @test ismissing(f(Union{Int, Missing}, missing))
+        @test f(Union{Int, Missing}, 1.0) === 1
         @test_throws MissingException f(Int, missing)
     end
 end
 
 @testset "printing" begin
     @test sprint(show, missing) == "missing"
-    @test sprint(showcompact, missing) == "missing"
+    @test sprint(show, missing, context=:compact => true) == "missing"
     @test sprint(show, [missing]) == "$Missing[missing]"
     @test sprint(show, [1 missing]) == "$(Union{Int, Missing})[1 missing]"
     b = IOBuffer()
@@ -217,6 +223,7 @@ end
     x = convert(Vector{Union{Int, Missing}}, [missing])
     @test isa(x, Vector{Union{Int, Missing}})
     @test isequal(x, [missing])
+    @test eltype(adjoint([1, missing])) == Union{Int, Missing}
 end
 
 @testset "== and != on arrays" begin
@@ -260,11 +267,22 @@ end
     @test ismissing((missing, 2) == (1, missing))
     @test !((missing, 1) == (missing, 2))
 
+    longtuple = (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)
+    @test ismissing((longtuple...,17,missing) == (longtuple...,17,18))
+    @test ismissing((longtuple...,missing,18) == (longtuple...,17,18))
+    @test !((longtuple...,17,missing) == (longtuple...,-17,18))
+    @test !((longtuple...,missing,18) == (longtuple...,17,-18))
+
     @test ismissing((1, missing) != (1, missing))
     @test ismissing(("a", missing) != ("a", missing))
     @test ismissing((missing,) != (missing,))
     @test ismissing((missing, 2) != (1, missing))
     @test (missing, 1) != (missing, 2)
+
+    @test ismissing((longtuple...,17,missing) != (longtuple...,17,18))
+    @test ismissing((longtuple...,missing,18) != (longtuple...,17,18))
+    @test (longtuple...,17,missing) != (longtuple...,-17,18)
+    @test (longtuple...,missing,18) != (longtuple...,17,-18)
 end
 
 @testset "< and isless on tuples" begin
@@ -346,4 +364,72 @@ end
     @test eltype(x) === Any
     @test collect(x) == [1, 2, 4]
     @test collect(x) isa Vector{Int}
+
+    @testset "mapreduce" begin
+        # Vary size to test splitting blocks with several configurations of missing values
+        for T in (Int, Float64),
+            A in (rand(T, 10), rand(T, 1000), rand(T, 10000))
+            if T === Int
+                @test sum(A) === sum(skipmissing(A)) ===
+                    reduce(+, skipmissing(A)) === mapreduce(identity, +, skipmissing(A))
+            else
+                @test sum(A) ≈ sum(skipmissing(A)) ===
+                    reduce(+, skipmissing(A)) === mapreduce(identity, +, skipmissing(A))
+            end
+            @test mapreduce(cos, *, A) ≈ mapreduce(cos, *, skipmissing(A))
+
+            B = Vector{Union{T,Missing}}(A)
+            replace!(x -> rand(Bool) ? x : missing, B)
+            if T === Int
+                @test sum(collect(skipmissing(B))) === sum(skipmissing(B)) ===
+                    reduce(+, skipmissing(B)) === mapreduce(identity, +, skipmissing(B))
+            else
+                @test sum(collect(skipmissing(B))) ≈ sum(skipmissing(B)) ===
+                    reduce(+, skipmissing(B)) === mapreduce(identity, +, skipmissing(B))
+            end
+            @test mapreduce(cos, *, collect(skipmissing(A))) ≈ mapreduce(cos, *, skipmissing(A))
+
+            # Test block full of missing values
+            B[1:length(B)÷2] .= missing
+            if T === Int
+                @test sum(collect(skipmissing(B))) == sum(skipmissing(B)) ==
+                    reduce(+, skipmissing(B)) == mapreduce(identity, +, skipmissing(B))
+            else
+                @test sum(collect(skipmissing(B))) ≈ sum(skipmissing(B)) ==
+                    reduce(+, skipmissing(B)) == mapreduce(identity, +, skipmissing(B))
+            end
+
+            @test mapreduce(cos, *, collect(skipmissing(A))) ≈ mapreduce(cos, *, skipmissing(A))
+        end
+
+        # Patterns that exercize code paths for inputs with 1 or 2 non-missing values
+        @test sum(skipmissing([1, missing, missing, missing])) === 1
+        @test sum(skipmissing([missing, missing, missing, 1])) === 1
+        @test sum(skipmissing([1, missing, missing, missing, 2])) === 3
+        @test sum(skipmissing([missing, missing, missing, 1, 2])) === 3
+
+        for n in 0:3
+            itr = skipmissing(Vector{Union{Int,Missing}}(fill(missing, n)))
+            @test sum(itr) == reduce(+, itr) == mapreduce(identity, +, itr) === 0
+            @test_throws ArgumentError reduce(x -> x/2, itr)
+            @test_throws ArgumentError mapreduce(x -> x/2, +, itr)
+        end
+    end
+end
+
+@testset "coalesce" begin
+    @test coalesce() === missing
+    @test coalesce(1) === 1
+    @test coalesce(nothing) === nothing
+    @test coalesce(missing) === missing
+    @test coalesce(missing, 1) === 1
+    @test coalesce(1, missing) === 1
+    @test coalesce(missing, missing) === missing
+    @test coalesce(missing, 1, 2) === 1
+    @test coalesce(1, missing, 2) === 1
+    @test coalesce(missing, missing, 2) === 2
+    @test coalesce(missing, missing, missing) === missing
+
+    @test coalesce(nothing, missing) === nothing
+    @test coalesce(missing, nothing) === nothing
 end

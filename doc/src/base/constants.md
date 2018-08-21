@@ -8,7 +8,7 @@ Base.C_NULL
 Base.VERSION
 Base.LOAD_PATH
 Base.Sys.BINDIR
-Base.Sys.CPU_CORES
+Base.Sys.CPU_THREADS
 Base.Sys.WORD_SIZE
 Base.Sys.KERNEL
 Base.Sys.ARCH
@@ -17,9 +17,9 @@ Base.Sys.MACHINE
 
 See also:
 
-  * [`STDIN`](@ref)
-  * [`STDOUT`](@ref)
-  * [`STDERR`](@ref)
+  * [`stdin`](@ref)
+  * [`stdout`](@ref)
+  * [`stderr`](@ref)
   * [`ENV`](@ref)
   * [`ENDIAN_BOM`](@ref)
   * `Libc.MS_ASYNC`
